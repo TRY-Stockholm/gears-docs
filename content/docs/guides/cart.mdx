@@ -17,7 +17,11 @@ How to mount `@made-people/grease-cart` in a React client, read cart state, muta
 ## 1. Install and peers
 
 ```bash
-bun add @made-people/grease-cart
+# Inside the monorepo
+rush add -p @made-people/grease-cart
+
+# Outside the monorepo
+pnpm add @made-people/grease-cart
 ```
 
 At `0.20.4` the peers are:
@@ -138,7 +142,7 @@ grease-cart is stateless across reloads. The `cartId` lives wherever the driver 
 
 ```tsx
 const centraTokenHandler = new CentraLocalStorageTokenHandler(
-  30 * 24 * 60 * 60 * 1000, // 30-day TTL
+  30 * 24 * 60 * 60, // 30-day TTL in seconds
 );
 ```
 
@@ -152,7 +156,6 @@ Voyado's `cartReference` reads the same handler via `centraTokenHandler.getToken
 - **Don't mount `CartInitialize` under Centra.** It's exported from `context/cart-initialize.tsx` and fires `fetchCart` on mount — opt-in for non-Centra drivers that need an on-mount hydrate. `CentraProvider` already pre-fetches and passes `initialCart`, so using both double-fetches.
 - **`oldCart` in events is one render behind.** Good for diffing, not for "state just before this call" — it's captured via `previousCartRef`.
 - **`loadingState` auto-resets.** It flips `"loading" → "complete" → "default"` on `DEFAULT_COMPLETE_TIMEOUT` (1000 ms). Override with `loadingCompleteTimeout`.
-- **`CartUpdateCommentOptions` has a stray `lol: string`.** Real, currently in source, treat as TODO.
 
 ## Troubleshooting
 

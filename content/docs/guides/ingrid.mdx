@@ -24,7 +24,11 @@ How to mount `@made-people/grease-ingrid` so the upsell widget appears in the mi
 Install:
 
 ```bash
-bun add @made-people/grease-ingrid
+# Inside the monorepo
+rush add -p @made-people/grease-ingrid
+
+# Outside the monorepo
+pnpm add @made-people/grease-ingrid
 ```
 
 > **Ingrid config is tenant-specific.** `siteId`, `cdnBaseUrl`, and `upsellWidgetToken` flow through `IngridPublicConfig` on the BFF. `cdnBaseUrl` is a required string — a missing value fails DTO validation on the BFF. Only `siteId` and `upsellWidgetToken` are optional; when they're missing, the dependent widgets quietly no-op.

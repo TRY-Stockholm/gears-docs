@@ -23,12 +23,19 @@ How `@made-people/grease-checkout` (version `0.8.2`) plugs into a client fronten
 - Peer deps: `@made-people/managed-props ~1.8.1`, `@made-people/react-prop-guard ~1.6.1`, `react@18.2.0`, `react-dom@18.2.0`, `zod@^3.22.4`.
 
 ```bash
-bun add @made-people/grease-checkout @made-people/grease-centra
+# Inside the monorepo
+rush add -p @made-people/grease-checkout
+rush add -p @made-people/grease-centra
+
+# Outside the monorepo
+pnpm add @made-people/grease-checkout @made-people/grease-centra
 ```
 
 ## 2. Mount `<CentraCheckout>` on the checkout route
 
-There is no `CheckoutProvider` to add. Place `<CentraCheckout>` inside your Centra and Cart providers and pass slot components:
+There is no `CheckoutProvider` to add. Place `<CentraCheckout>` inside your Centra and Cart providers and pass slot components through `uiConfig.components`.
+
+`uiConfig.components` is typed as `CentraCheckoutUiConfigComponents` — a dictionary of every slot the checkout flow renders. The common ones you'll always set are listed below; the full list of overridable slots (loading states, error views, zero-total flow) appears in the table at the end of §3.
 
 ```tsx
 import { CentraCheckout, CentraReviveCart } from "@made-people/grease-centra";

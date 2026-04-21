@@ -17,7 +17,11 @@ How to mount `@made-people/grease-storyblok` so server-fetched stories render as
 ## 1. Install
 
 ```bash
-bun add @made-people/grease-storyblok
+# Inside the monorepo
+rush add -p @made-people/grease-storyblok
+
+# Outside the monorepo
+pnpm add @made-people/grease-storyblok
 ```
 
 Install every peer at the required range — missing peers break the provider at runtime.

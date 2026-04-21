@@ -27,7 +27,12 @@ Before you wire anything, these five facts decide the shape of your code:
 Install:
 
 ```bash
-bun add @made-people/grease-account @made-people/grease-order
+# Inside the monorepo
+rush add -p @made-people/grease-account
+rush add -p @made-people/grease-order
+
+# Outside the monorepo
+pnpm add @made-people/grease-account @made-people/grease-order
 ```
 
 ## 2. The provider tree
@@ -60,13 +65,20 @@ const accountProviderProps: AccountProviderProps = {
 
 Build bottom-up: Centra first, then wrap with Voyado if you use Engage.
 
+`id` and `i` come from the reset-password URL (`/reset-password?id=…&i=…`). Read them with `useSearchParams` from `@remix-run/react` (or the framework's equivalent) and feed them into the driver constructor — the driver forwards them on the reset call.
+
 ```tsx
+import { useSearchParams } from "@remix-run/react";
 import {
   CentraAccountClient, CentraAccountMappers,
   centraCheckoutApiCustomerToGreaseCustomer,
   makeCentraCheckoutApiOrderToGreaseOrderMapper,
 } from "@made-people/grease-centra";
 import { VoyadoEngageCentraAccountDriver } from "@made-people/grease-voyado-engage";
+
+const [searchParams] = useSearchParams();
+const id = searchParams.get("id") ?? undefined;
+const i = searchParams.get("i") ?? undefined;
 
 const mappers: CentraAccountMappers = {
   orderMapper: makeCentraCheckoutApiOrderToGreaseOrderMapper(/* … */),

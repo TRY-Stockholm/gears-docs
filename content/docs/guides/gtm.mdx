@@ -19,7 +19,11 @@ How to mount `@made-people/grease-gtm` so GTM loads and GA4-style ecommerce even
 Package: `@made-people/grease-gtm` (0.19.5). Peer deps: `@made-people/grease-order ~0.10.11`, `@made-people/grease-ui-events ~0.4.1`, `@made-people/react-use-effect-once ~0.3.1`, `react 18.2.0`, `sha.js ~2.4.11`, `zod ^3.22.4`.
 
 ```bash
-bun add @made-people/grease-gtm
+# Inside the monorepo
+rush add -p @made-people/grease-gtm
+
+# Outside the monorepo
+pnpm add @made-people/grease-gtm
 ```
 
 ## 2. Load the scripts
@@ -120,7 +124,6 @@ Returning `false` aborts the push before it reaches `dataLayer`. For tests, `res
 - Each ecommerce push first writes `{ ecommerce: null }` to reset GTM's auto-merging.
 - `gtmDataLayerPushEvent` warns and noops when `window` is undefined — SSR-safe.
 - `firstBrowserInteraction` is a perf hint, not an analytics event. Do not bind GA or FB tracking to it.
-- Wiring verified only in `client-frontends/dedicated/app/project/bootstrap/bootstrap.tsx` and `client-frontends/dedicated/app/root.tsx`. Stronger and Miss Mary not checked.
 
 ## Troubleshooting
 

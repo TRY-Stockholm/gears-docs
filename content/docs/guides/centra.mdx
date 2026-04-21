@@ -23,7 +23,11 @@ How to mount `@made-people/grease-centra` so Centra drives cart, product search,
 ## Install
 
 ```bash
-bun add @made-people/grease-centra
+# Inside the monorepo
+rush add -p @made-people/grease-centra
+
+# Outside the monorepo
+pnpm add @made-people/grease-centra
 ```
 
 Every peer in `peerDependencies` must be installed at the required range — missing peers break the provider at runtime.

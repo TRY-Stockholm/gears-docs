@@ -17,7 +17,11 @@ How to mount `@made-people/grease-growthbook` so flags, experiments, and managed
 ## 1. Install
 
 ```bash
-bun add @made-people/grease-growthbook
+# Inside the monorepo
+rush add -p @made-people/grease-growthbook
+
+# Outside the monorepo
+pnpm add @made-people/grease-growthbook
 ```
 
 Peers required: `@growthbook/growthbook ~1.6.1`, `@growthbook/growthbook-react ~1.6.1`, `@made-people/grease-event-emitter ~0.4.1`, `@made-people/grease-ui-events ~0.4.1`, `@made-people/managed-props ~1.8.1`, `@made-people/react-prop-guard ~1.6.1`, `@made-people/typeguards-common ~1.1.1`, `js-cookie ~3.0.5`, `react 18.2.0`, `react-dom 18.2.0`, `zod ^3.22.4`.

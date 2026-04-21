@@ -87,7 +87,6 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
-  useRouteLoaderData,
 } from "@remix-run/react";
 import type { DataFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
@@ -135,10 +134,10 @@ export default function App() {
 
 ## 5. Configuration provider
 
-Anything that reads a service URL or the tenant needs `GearsConfigurationProvider` above it. Create `app/project/bootstrap.tsx` — we'll flesh it out in the next step, but for now the outer shell looks like this:
+Anything that reads a service URL or the tenant needs `GearsConfigurationProvider` above it. Here's the shape `app/project/bootstrap.tsx` will take — step 6 replaces it with the complete file, so skim rather than save:
 
 ```tsx
-// app/project/bootstrap.tsx (skeleton — don't save yet)
+// app/project/bootstrap.tsx (skeleton)
 import { PropsWithChildren } from "react";
 import { useRouteLoaderData } from "@remix-run/react";
 import { GearsConfigurationProvider } from "@made-people/gears-configuration";
@@ -170,7 +169,7 @@ Valid service keys: `"bff" | "engage" | "elevate" | "algolia" | "yotpo"`. For th
 
 ## 6. Bootstrap stack — the minimum viable tree
 
-Now the full bootstrap. Three providers, in this order, wrapped by `GearsConfigurationProvider`:
+Now the full bootstrap. The tutorial stack is three layers — config, Centra, cart — and nothing else. For the full production stack (Voyado, GTM, Ingrid, GrowthBook, etc.) see [Anatomy §2](./anatomy-of-a-gears-client#2-the-provider-stack).
 
 | Provider | Why it's here |
 |---|---|
@@ -196,7 +195,6 @@ import {
 } from "@made-people/centra-checkout-api";
 import { CentraProvider } from "@made-people/grease-centra";
 import type { FrontendContextV1 } from "@made-people/nestjs-bff-service";
-import { useRouteLoaderData as useRouteLoaderDataTyped } from "@remix-run/react";
 import type { loader as rootLoader } from "../root";
 import type { gearsLoader } from "@made-people/gears-remix";
 
@@ -205,7 +203,7 @@ const ConfiguredBootstrap = ({ children }: PropsWithChildren) => {
   const tenantId = useGearsConfigurationVariable("tenantId");
 
   const rootLoaderData = useRouteLoaderData<typeof rootLoader>("root");
-  const pageLoaderData = useRouteLoaderDataTyped<typeof gearsLoader>(
+  const pageLoaderData = useRouteLoaderData<typeof gearsLoader>(
     "project-router-wildcard",
   );
 
@@ -215,7 +213,7 @@ const ConfiguredBootstrap = ({ children }: PropsWithChildren) => {
     | undefined;
 
   const centraTokenHandler = useMemo(
-    () => new CentraLocalStorageTokenHandler(30 * 24 * 60 * 60 * 1000),
+    () => new CentraLocalStorageTokenHandler(30 * 24 * 60 * 60),
     [],
   );
 
@@ -284,6 +282,7 @@ Two things worth calling out:
 
 - **`useMemo` on the token handler and the client.** The token handler persists the Centra selection id to localStorage — constructing it per render rotates the token and blanks the cart.
 - **`mapperOptions` has no custom mappers.** Real clients pass `strongerCentraMappers` or similar to customise product shape. The default mapper is fine for this tutorial.
+- **No `productImageKey`.** Real clients pass `productOptions: { productImageKey: "full" }` (or a tenant-specific key) so `product.media` resolves to a URL. This tutorial doesn't render images, so we skip it — add it the moment you render a `<img />` against `product.media`.
 
 > If you see `"useGearsConfiguration must be used within a GearsConfigurationProvider"` at runtime, you've mounted a hook above `GearsConfigurationProvider`. Move it inside.
 

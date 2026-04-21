@@ -24,7 +24,11 @@ How `@made-people/grease-product` turns a backend product payload into a typed `
 ## Install
 
 ```bash
-bun add @made-people/grease-product
+# Inside the monorepo
+rush add -p @made-people/grease-product
+
+# Outside the monorepo
+pnpm add @made-people/grease-product
 ```
 
 Current version is `1.29.0`. Peer deps must match exactly: `react@18.2.0`, `react-dom@18.2.0`, `zod@^3.22.4`, `@made-people/grease-event-emitter@~0.4.1`, `@made-people/react-prop-guard@~1.6.1`, `@made-people/react-use-effect-once@~0.3.1`.
