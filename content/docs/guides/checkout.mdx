@@ -1,0 +1,137 @@
+---
+title: Implementing Checkout
+description: Wire up grease-checkout for address forms, shipping, payment, and order finalization in a client frontend
+---
+
+## What this guide covers
+
+How `@made-people/grease-checkout` (version `0.8.2`) plugs into a client frontend. It is a *contract* package: it exports component interfaces (address form, shipping, free order, cart-modified), the `checkoutEventEmitter`, and `CheckoutEventEmitterContext`. The runtime — flow state, PSP wiring, finalization — lives in `@made-people/grease-centra`. Slots passed to `<CentraCheckout>` are typed against this package.
+
+## Prerequisites
+
+- `grease-cart` wired and hydrating (see the Cart guide).
+- A commerce backend driver — in practice Centra, via `@made-people/grease-centra`. See the Centra and Anatomy guides.
+- A payment provider configured in Centra (Adyen, Qliro, Klarna, or standalone). The PSP iframe/drop-in is rendered by `grease-centra`.
+- A shipping provider — Centra-native methods or Ingrid (`IngridProvider` from `@made-people/grease-ingrid`).
+- Peer deps: `@made-people/managed-props`, `@made-people/react-prop-guard`, `react@18.2.0`, `react-dom@18.2.0`, `zod@^3.22.4`.
+
+## Install
+
+```bash
+bun add @made-people/grease-checkout @made-people/grease-centra
+```
+
+## Wire up the provider
+
+There is no dedicated `CheckoutProvider` in `grease-checkout`. `<CentraCheckout>` internally mounts `CheckoutEventEmitterContext` and the UI config provider. Place it on the checkout route inside your Centra/Cart providers:
+
+```tsx
+import { CentraCheckout, CentraReviveCart } from "@made-people/grease-centra";
+import {
+  ShippingMethodOption, ShippingMethods,
+  ShippingMethodsNotConfigured, PaymentWrapper,
+} from "@made-people/blueprint-checkout";
+
+<CentraReviveCart />
+<CentraCheckout
+  uiConfig={{ components: {
+    AddressForm: StrongerAddressForm,
+    ShippingMethods, ShippingMethodOption, ShippingMethodsNotConfigured,
+    QliroWrapper: PaymentWrapper, AdyenDropInWrapper: PaymentWrapper,
+    KlarnaCheckoutWrapper: PaymentWrapper, IngridWrapper: PaymentWrapper,
+    FreeOrder,
+  }}}
+  paymentPages={{
+    paymentReturnPage: baseUrl + href("checkout/finalize"),
+    paymentFailedPage: baseUrl + href("checkout"),
+    visitorIpAddress,
+  }}
+/>
+```
+
+## The checkout flow
+
+1. **Cart** — `CentraReviveCart` hydrates the selection.
+2. **Address** — the `AddressForm` slot renders (typed by `CheckoutAddressForm`).
+3. **Shipping** — `ShippingMethods` + `ShippingMethodOption`, or `IngridWrapper` around Ingrid.
+4. **Payment** — one PSP wrapper (`QliroWrapper` / `AdyenDropInWrapper` / `KlarnaCheckoutWrapper`), or `FreeOrder` for zero-total.
+5. **Finalize** — PSP redirects to `paymentReturnPage`; that route renders `<CentraCheckoutFinalize>`.
+
+`grease-checkout` owns slot contracts and the event emitter. `grease-centra` owns flow, PSP wiring, and finalize.
+
+## Address form
+
+Build your form against `CheckoutAddressFormProps`:
+
+```tsx
+import type {
+  CheckoutAddressForm, OnUpdateFunction,
+  ValidateAddressFunction,
+} from "@made-people/grease-checkout";
+
+export const StrongerAddressForm: CheckoutAddressForm = ({
+  address, shippingAddress, validateAddress, onUpdate,
+}) => {
+  // render fields from address.email, .firstName, .country…
+  // call validateAddress({ address, shippingAddress })
+  // call onUpdate({ address, shippingAddress })
+};
+```
+
+`CheckoutAddress` fields carry `{ value, required, validationResult }`. `country` is a select with `options: AddressCountry[]` and optional `states`.
+
+To react to address updates (e.g. identify the contact in Voyado Engage):
+
+```tsx
+flow={{ singlePaymentMethodFlow: { checkoutAddressForm: {
+  onAddressUpdate: ({ address }) => { /* … */ },
+}}}}
+```
+
+## Shipping selection
+
+For Centra-native, implement `CheckoutShippingMethodsComponent` (a `PropsWithChildren` wrapper) and `CheckoutShippingMethodOptionComponent` (radio-like; receives `label`, `methodKey`, `price`, `priceNumber`, `isSelected`, `onChange`, `loading`, `isFreeShipping`). For Ingrid, mount `IngridProvider` in your bootstrap and pass a layout wrapper as `IngridWrapper` — `grease-centra` renders the iframe inside it. `grease-checkout` fires `shippingMethodSelected` on `checkoutEventEmitter` when the selection changes.
+
+## Payment
+
+Payment selection, PSP drop-ins, and redirection all live in `grease-centra`. You provide *layout wrappers* — each is a `FunctionComponent<PropsWithChildren>`. For zero-total carts, the `FreeOrder` slot (`FreeOrderComponent` — `{ placeOrder }`) renders instead. Subscribe to `checkoutEventEmitter.on("paymentMethodSelected", …)` for analytics; `grease-gtm` already does this for GA4 `add_payment_info`.
+
+## Finalize order
+
+`<CentraCheckoutFinalize>` from `grease-centra` owns the finalize step. `postData` carries payment-method fields collected by a Remix action on redirect PSPs:
+
+```tsx
+import { CentraCheckoutFinalize } from "@made-people/grease-centra";
+
+<CentraCheckoutFinalize
+  postData={actionData?.paymentMethodFields}
+  uiConfig={{ components: {
+    GenericOrderReceipt: (props) => <SuccessPage {...props} />,
+    SelectionNotFound: () => <CartNotFound />,
+  }}}
+/>
+```
+
+`GenericOrderReceipt` receives the finalized order. `SelectionNotFound` renders when the Centra selection is gone (expired session or double finalize).
+
+## Gotchas
+
+- No `CheckoutProvider` export — mount `<CentraCheckout>` instead.
+- `src/types/checkout.ts` exports nothing usable; its schema is commented out.
+- `ShippingMethodsNotConfigured` is a `grease-centra` slot, not a `grease-checkout` contract.
+- `checkoutEventEmitter` is a module-level singleton. Pass a custom one to `<CentraCheckout checkoutEventEmitter={…}>` for test isolation.
+- `OnUpdateFunction` is sync in the type but Centra's handler is async — return a promise and `await` it in your form.
+
+## Related packages
+
+- `@made-people/grease-cart` — selection hydration before checkout.
+- `@made-people/grease-centra` — checkout engine; owns `<CentraCheckout>` and `<CentraCheckoutFinalize>`.
+- `@made-people/grease-ingrid` — Ingrid shipping iframe + upsell widget.
+- `@made-people/grease-order` — `GenericOrderReceiptComponent` type used on finalize.
+- `@made-people/grease-gtm` — subscribes to `checkoutEventEmitter` for GA4 events.
+
+## Troubleshooting
+
+- **`useCheckoutEventEmitter must be used inside a <CheckoutEventContext />`** — a child is calling the hook outside `<CentraCheckout>`. Mount it higher, or pass the emitter explicitly.
+- **Finalize renders `SelectionNotFound`** — the Centra selection/token was lost during redirect. Check `CentraLocalStorageTokenHandler` TTL and that the return URL preserves cookies/localStorage.
+- **`onAddressUpdate` never fires** — it belongs under `flow.singlePaymentMethodFlow.checkoutAddressForm.onAddressUpdate` on `<CentraCheckout>`, not on the `AddressForm` slot.

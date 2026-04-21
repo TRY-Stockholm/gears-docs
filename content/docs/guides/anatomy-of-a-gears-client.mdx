@@ -1,0 +1,123 @@
+---
+title: Anatomy of a Gears Client
+description: How a Gears-based React client is structured — bootstrap provider stacking, service-URL configuration, and Remix routing conventions
+---
+
+## What this guide covers
+
+You are a React developer new to Gears, landing in a client frontend like `client-frontends/stronger` or `client-frontends/dedicated`. Every integration guide assumes you already know where a provider plugs in, how it gets the right URL, and which Remix route owns the page being rendered. This guide is that missing layer.
+
+## The three pillars
+
+A Gears client rests on three conventions. First, a `GearsConfigurationProvider` from `@made-people/gears-configuration` wraps the entire tree so every hook downstream can resolve service URLs and env values. Second, the bootstrap file stacks providers in a specific order — configuration at the root, then cross-cutting data providers, then feature integrations that depend on them. Third, `app/gears/routes/` holds page-level Remix routes that receive a typed `frontendContext` and the resolved page payload from the BFF.
+
+## `GearsConfigurationProvider` and `frontendContext`
+
+`GearsConfiguration` is a zod-validated object — `tenantId`, `gearsEnvironment`, `localServices`, `gearsRunMode`, `gearsDomain`, `gearsClusterMode` — that tells the client how to construct service URLs. Values come from the root Remix loader: `gearsRootLoader` in `@made-people/gears-remix` reads them from server env vars, bundles them with `settingsAndContentResponse` from the BFF, and ships them to the client.
+
+`FrontendContextV1` is a separate per-request payload resolved by the BFF (market, marketName, pricelist, currency, country, language, siteSlug, baseUrl, optional campaignSite). Declared in `@made-people/nestjs-bff-service` and read inside route components.
+
+```tsx
+// Dedicated — Bootstrap wrapper (trimmed)
+export const Bootstrap = (props: BootstrapProps) => {
+  if (!props.rootLoaderData) return null;
+
+  const gearsConfigurationProps: GearsConfigurationProviderProps = {
+    gearsConfiguration: props.rootLoaderData.gearsConfiguration,
+  };
+
+  return (
+    <GearsConfigurationProvider {...gearsConfigurationProps}>
+      <_Bootstrap {...props}>{props.children}</_Bootstrap>
+    </GearsConfigurationProvider>
+  );
+};
+```
+
+## Resolving service URLs with `useGearsServiceUrl`
+
+Never hard-code hostnames. `useGearsServiceUrl` returns the correct URL for the current tenant, environment, cluster, and domain. Keys come from the `gearsService` zod enum: `"bff" | "engage" | "elevate" | "algolia" | "yotpo"`.
+
+```tsx
+const bffUrl = useGearsServiceUrl("bff");
+const engageUrl = useGearsServiceUrl("engage");
+const tenantId = useGearsConfigurationVariable("tenantId");
+```
+
+Hard-coding bypasses multi-tenant deploys and the `localServices` override (redirects a service to a local port). For non-URL values use `useGearsConfigurationVariable(key)`. Both hooks throw if used outside `GearsConfigurationProvider`.
+
+## Bootstrap provider stacking
+
+The convention: `GearsConfigurationProvider` wraps everything; then shared infrastructure (images, links, query params, translations); then data providers (Centra cart, account, search); then feature integrations (Voyado, GTM, Elevate, EcomID). Order matters — the Voyado bootstrap reads the Centra cart token, GTM mappers consume cart/product state, and account flows expect the Voyado driver mounted.
+
+```tsx
+// Stronger — _Bootstrap render tree (trimmed, ~20 providers elided with // …)
+<StoryblokComponentProvider {...storyblokComponentProviderProps}>
+  <IngridProvider /* … */>
+    <ImageProcessorProvider {...imageProcessorProps}>
+      <GtmProvider {...gtmProviderProps}>
+        <LinkProvider {...linkProviderProps}>
+          <StrongerCountriesAndLanguagesProvider /* … */>
+            {/* … */}
+            <SearchProvider {...searchProviderProps}>
+              <NewsletterProvider {...newsletterProviderProps}>
+                <BackInStockProvider {...backInStockProviderProps}>
+                  <AccountProvider {...accountProviderProps}>
+                    <EcomIdProvider config={ecomIdConfig}>
+                      <VoyadoEngageProvider {...voyadoEngageBootstrapProps}>
+                        <CentraBootstrap /* cart, checkout, product */>
+                          <ElevateBootstrap {...elevateBootstrapProps}>
+                            <TranslationsProvider {...translationsProviderProps}>
+                              <html lang={hreflang}>{children}</html>
+                            </TranslationsProvider>
+                          </ElevateBootstrap>
+                        </CentraBootstrap>
+                      </VoyadoEngageProvider>
+                    </EcomIdProvider>
+                    {/* … */}
+```
+
+Read inside-out: leaf providers (translations) sit closest to children; `CentraBootstrap` and `VoyadoEngageProvider` are adjacent because Voyado identification depends on a Centra cart reference; configuration-level providers sit outermost so every hook below resolves.
+
+## Remix routing (`/app/gears/routes/`)
+
+`gearsRootLoader` runs at `root.tsx` and populates shared data. Page-level routes in `app/gears/routes/` receive `{ page, frontendContext }` from `pageLoaderData` — the `gearsLoader` helper from `@made-people/gears-remix` drives the wildcard route that dispatches on `page.pageType`.
+
+Representative files (same in Stronger and Dedicated):
+
+- `centra-product-page-route.tsx` — PDP. Signature `(props: { page: CentraProductPage; frontendContext: FrontendContextV1 })`. Mounts `ProductProvider`, `BreadCrumbsProvider`, and `ProductTemplate`.
+- `storyblok-page-route.tsx` — CMS pages and PLPs. Uses `useGearsServiceUrl("bff")` + `useGearsConfigurationVariable("tenantId")` for preview story resolution.
+- `checkout-index-route.tsx` — cart + checkout via Centra's `CentraCheckout`, wires Voyado identification on email update.
+- `checkout-finalize-route.tsx`, `search-page-route.tsx`, `account/` — post-payment, search, account flows.
+
+Routes should not reach into gears config for anything beyond the two hooks above. Everything else arrives as props.
+
+## What lives where
+
+- `app/project/` — wiring. Bootstrap, mappers, hooks, client-specific components, config constants.
+- `app/gears/routes/` — page-level Remix route components consumed by the wildcard router.
+- `app/services/` — optional; client-specific driver setup (e.g. Stronger has `app/services/growthbook/`). Not every client uses it.
+- `app/root.tsx` — the Remix root where `gearsRootLoader` and `rootLoaderData` are declared.
+
+## Gotchas
+
+- **Provider order.** `VoyadoEngageProvider` depends on the Centra cart reference; placing it outside `CentraBootstrap` leaves `cartReference` empty. `AccountProvider` depends on the Voyado driver for identify flows.
+- **Missing `GearsConfigurationProvider`.** `useGearsServiceUrl` or `useGearsConfigurationVariable` outside the provider throws `"useGearsConfiguration must be used within a GearsConfigurationProvider"`.
+- **Hard-coded URLs.** Bypasses `tenantId`, `gearsEnvironment`, and `localServices` overrides — silently hits the wrong cluster in preview or local dev.
+- **`marketId` vs `marketName`.** `FrontendContextV1.market` is a numeric id string (Centra market). `marketName` is the human-readable code (e.g. `"SE"`), optional — many configs default to `"SE"` when missing.
+- **SSR hydration of `frontendContext`.** Read it via `useRouteLoaderData("project-router-wildcard")`, never from `window`. Before the loader resolves it is `undefined` and will crash downstream providers.
+- **Root vs page loader data.** `gearsConfiguration` is root-loader data; `pageResponse` and `frontendContext` are page-loader data. Confusing them produces `undefined` props at the bootstrap boundary.
+
+## Related packages
+
+- `@made-people/gears-configuration` — `GearsConfigurationProvider`, `useGearsServiceUrl`, `useGearsConfigurationVariable`.
+- `@made-people/gears-remix` — `gearsRootLoader`, `gearsLoader` for the wildcard router.
+- `@made-people/gears-bff-client` — `BffClient`, `fetchSettingsAndContent`.
+- `@made-people/nestjs-bff-service` — types including `FrontendContextV1`, `CentraProductPage`, `StoryblokPage`.
+- Next steps: [Implementing Voyado Engage](./implementing-voyado-engage), [Centra](./centra), [Ingrid](./ingrid), [GTM](./gtm), [GrowthBook](./growthbook).
+
+## Troubleshooting
+
+- **Providers crash with "X must be used within Y".** You placed a hook above its provider, or forgot to mount `GearsConfigurationProvider` entirely. Check the bootstrap render order against the stack documented above.
+- **Service URL returns wrong tenant or cluster.** `tenantId` or `gearsEnvironment` is missing from the root loader data. Inspect `rootLoaderData.gearsConfiguration` — if any field is `undefined`, the corresponding env var is not set on the server.
+- **Route loader returns `null` and the page renders blank.** `gearsRootLoader` returns `null` for unhandled URLs or empty paths; `Bootstrap` then bails out. Check the URL against `shouldHandleUrl` and confirm the BFF returned a `settingsAndContentResponse`.

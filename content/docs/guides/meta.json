@@ -1,6 +1,13 @@
 {
   "title": "Guides",
   "pages": [
+    "anatomy-of-a-gears-client",
+    "---Commerce core---",
+    "cart",
+    "checkout",
+    "product",
+    "account",
+    "---Integrations---",
     "implementing-voyado-engage",
     "storyblok",
     "centra",

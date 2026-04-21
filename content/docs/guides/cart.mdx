@@ -1,0 +1,131 @@
+---
+title: Implementing Cart
+description: Wire up grease-cart for cart state, line items, quantity updates, and voucher codes in a client frontend
+---
+
+## What this guide covers
+
+How to mount `@made-people/grease-cart` in a React client frontend, read cart state, mutate line items, and apply voucher codes. Most clients use Centra, which ships `CentraCartClientDriver` and mounts `CartProvider` for you.
+
+## Prerequisites
+
+- React 18.2 client frontend.
+- A driver implementing `CartClientDriver` — usually `CentraCartClientDriver` from `@made-people/grease-centra` (see the Centra guide).
+- `@made-people/grease-product` in the tree; the Anatomy guide already puts it there.
+
+## Install
+
+```bash
+bun add @made-people/grease-cart
+```
+
+At `0.20.4` the peers are `react@18.2.0`, `react-dom@18.2.0`, `zod@^3.22.4`, and `@made-people/grease-product@~1.29.0`. Schemas also reference `@made-people/grease-money` and events run through `@made-people/grease-event-emitter` — install those explicitly outside the usual stack.
+
+## Wire up the provider
+
+In Centra apps you don't mount `CartProvider` directly — `CentraProvider` does it via an inner `CentraGreaseCartProvider`. Trimmed from Stronger's bootstrap:
+
+```tsx
+// client-frontends/stronger/app/project/bootstrap/centra/centra-bootstrap.tsx
+import { CentraProvider, CentraProviderProps } from "@made-people/grease-centra";
+
+const centraProviderProps: CentraProviderProps = {
+  mapperOptions: { mappers: strongerCentraMappers, options: { /* … */ } },
+  checkoutAPIClient: centraCheckoutAPIClient,
+  initializationType:
+    pageType === "checkoutFinalize" ? "dontInitialize" : "onLoad",
+  queryContext: { /* market, pricelist, language, site */ },
+};
+
+return <CentraProvider {...centraProviderProps}>{children}</CentraProvider>;
+```
+
+For a non-Centra driver, mount `CartProvider` directly with `cartClientDriver` and optional `initialCart`. When `cartEventEmitter` is omitted a shared singleton is used.
+
+## Driver pattern
+
+grease-cart is backend-agnostic. Implement `CartClientDriver` — a flat object of async methods returning `Cart` — and hand it to the provider. The package dispatches reducer actions and emits events around each call.
+
+```ts
+// src/frontend/grease/centra/src/cart/centra-cart-client-driver.ts
+export class CentraCartClientDriver implements CartClientDriver {
+  // …
+  addToCart: CartAddToCart = async (payload) =>
+    this.client
+      .postItem({ itemId: payload.itemId, quantity: payload.quantity ?? 1 })
+      .then((r) => this.handleSelectionResponse(r));
+}
+```
+
+The interface is `fetchCart`, `addToCart`, `addBundleToCart`, `removeFromCart`, `updateQuantity`, `updateComment`, `addVoucher`, `removeVoucher`.
+
+## Reading cart state
+
+```tsx
+import { useCartState } from "@made-people/grease-cart";
+
+const { cart, loading, error } = useCartState();
+```
+
+`cart.items` is a `LineItem[]` discriminated union (`type: "product" | "bundle"`) with `lineId`, `quantity`, `price`, and the embedded `product`. `cart.totals` follows `CartTotals` — `grandTotal`, `subtotal`, `shipping`, optional `tax` and `discount`.
+
+## Mutating the cart
+
+`useCartMethod(name)` wraps any driver call and returns `{ execute, loadingState, error }`. `execute`'s argument type is inferred from the driver signature.
+
+```tsx
+// src/frontend/blueprint/cart-item/src/components/QuantityPicker.tsx
+const updateQuantity = useCartMethod("updateQuantity");
+const removeFromCart = useCartMethod("removeFromCart");
+
+updateQuantity.execute({ lineId: data.lineId, quantity: data.quantity + 1 });
+removeFromCart.execute({ lineId: data.lineId, quantity: 1, removedItem: data });
+```
+
+For PDP flows use composed hooks: `useUpdateCart()` picks between `addToCart` / `updateQuantity` based on whether the item is already in the cart and returns `quantityInCart`, `isAvailable`, `isOutOfStock`. `useQuickShopAddToCart()` is the one-shot add for quickshop cards. Both need a grease-product context.
+
+## Vouchers and discount codes
+
+```tsx
+// src/frontend/blueprint/cart-summary/src/components/voucher-input/VoucherInput.tsx
+const { execute, loadingState } = useCartMethod("addVoucher");
+await execute({ voucherCode });
+```
+
+Applied vouchers sit on `cart.vouchers` as `Voucher[]` — a union of `CodeVoucher` (`type: "code"`, has `code`) and `AutoVoucher` (`type: "auto"`), both carrying `name`, `discount`, and `affectsOrderTotal`. `removeVoucher({ voucherCode })` undoes it.
+
+## Persistence / session token
+
+grease-cart is stateless across reloads — the `cartId` lives wherever your driver keeps it. With Centra that's `CentraLocalStorageTokenHandler`, built once in the bootstrap and shared with the checkout API client:
+
+```tsx
+const centraTokenHandler = new CentraLocalStorageTokenHandler(
+  30 * 24 * 60 * 60 * 1000, // 30-day TTL
+);
+const centraCheckoutAPIClient = createCentraCheckoutAPIClient({
+  baseUrl: settingsAndContentResponse.centraCheckoutApiBaseUrl,
+  centraTokenHandler,
+});
+```
+
+Voyado's `cartReference` reads the same handler (`centraTokenHandler.getToken()`) to correlate cart events across services.
+
+## Gotchas
+
+- `updateComment` is in the interface but `CentraCartClientDriver.updateComment` throws `"Not Implemented"`.
+- `CartInitialize` calls `fetchCart` once on mount. Centra doesn't use it — `CentraProvider` pre-fetches and passes `initialCart`. Mounting both double-fetches.
+- Cart events expose `oldCart` one render behind (via `previousCartRef`) — good for diffing, not for "state just before this call".
+- `loadingState` flips `"loading" → "complete" → "default"` on `DEFAULT_COMPLETE_TIMEOUT` (1000 ms). Override with `loadingCompleteTimeout`.
+
+## Related packages
+
+- `@made-people/grease-centra` — `CentraCartClientDriver`, mounts `CartProvider` via `CentraProvider`.
+- `@made-people/grease-product` — hard peer; `useUpdateCart` / `useQuickShopAddToCart` read its context.
+- `@made-people/grease-voyado-engage` — subscribes to `cartEventEmitter`.
+- `blueprint-cart-item`, `blueprint-cart-summary`, `blueprint-mini-cart` — prebuilt UI.
+
+## Troubleshooting
+
+- **`useCartState must be used inside a <CartProvider />`:** rendered outside `CentraProvider`. Cart must sit inside the checkout API client's provider tree.
+- **Voucher call succeeds but UI doesn't update:** the driver isn't returning a mapped `Cart` from `addVoucher`. The reducer only refreshes on the `Success` payload.
+- **Cart resets to empty on reload:** the Centra token isn't persisting. Ensure `CentraLocalStorageTokenHandler` is constructed once (not per render) and that a cookie-consent handler isn't clearing localStorage before the initial selection fetch.
