@@ -64,7 +64,104 @@ npm run build
 
 Client frontends (`miss-mary`, `stronger`, `dedicated`) **don't need to be built during development** — their dev servers do live compilation. Only build library packages you're actively editing.
 
-## 5. Dev servers
+## 5. Environment variables for client frontends
+
+Each client has an `env-dist` file at its root (`client-frontends/stronger/env-dist`, etc.). **Copy it to `.env` on first run**:
+
+```bash
+cd client-frontends/stronger
+cp env-dist .env
+```
+
+The checked-in `env-dist` is enough to boot against our shared test cluster. No secrets required.
+
+### The four variables that matter
+
+Every client sets these four — they control which Gears backend the client talks to:
+
+| Variable | Example | What it does |
+|---|---|---|
+| `GEARS_RUN_MODE` | `local` | `local` = go over the public internet. `cluster` = go via the in-cluster DNS (used when the client is deployed). |
+| `GEARS_ENVIRONMENT` | `test` | Which Gears environment to hit: `test`, `stage`, `prod`. |
+| `GEARS_CLUSTER_MODE` | `saas` | `saas` (multi-tenant cluster) vs `non-saas` (legacy single-tenant). All current clients are `saas`. |
+| `GEARS_DOMAIN` | `gears.madepeople.dev` | Base domain appended when constructing service URLs. |
+
+Together these feed `getGearsServiceUrl("bff" | "engage" | "elevate" | "algolia" | "yotpo")`, which resolves to things like `https://<tenant>.bff.test.gears.madepeople.dev`. **Never hard-code those hosts** — always go through the hook.
+
+> `tenantId` is **not** in `.env`. It's served by `gearsRootLoader` from server-side config so a single deploy can answer for multiple tenants.
+
+### Overriding individual services with `LOCAL_SERVICES`
+
+When you're running a Gears service locally (e.g. a local BFF) and want the client to talk to *it* instead of the cluster, add `LOCAL_SERVICES`:
+
+```bash
+# Point the BFF at your local instance; everything else still hits test
+LOCAL_SERVICES=bff
+GEARS_DOMAIN=frackend.net
+```
+
+Values are comma- or space-separated. Optionally pin a port: `LOCAL_SERVICES=bff, engage:8087`. Listed services are rewritten to `https://<tenant>.<service>.local.<GEARS_DOMAIN>:8080`. The Dedicated client's `.env` has the local-BFF block commented out as a ready-to-uncomment recipe.
+
+### When you change `.env`
+
+Restart the dev server. Vite/Remix picks env up at boot, not on hot reload.
+
+## 6. The BFF
+
+The **BFF** (Backend-for-Frontend) is the service every client talks to for anything that isn't cart/checkout. It lives in `src/services/nestjs/nestjs-bff-service/` and it's the glue between Centra, Storyblok, Algolia, Voyado, Trustpilot, GrowthBook, and the client.
+
+### What it does
+
+One BFF exposes one public API (`v1/...`) the client calls from loaders and client-side code. Typical endpoints:
+
+| Route | What it returns |
+|---|---|
+| `v1/sites` → settings & content | Per-site config + translations + navigation — fetched by `gearsRootLoader` on every request |
+| `v1/pages` | CMS page lookup by slug → `StoryblokPage` |
+| `v1/centra/products-search` | Faceted product search backed by Centra |
+| `v1/centra/selection` | Centra selection (cart) initialization |
+| `v1/centra/shipping-options` | Shipping options for a given selection |
+| `v1/ecomid` | Ecomid resolution (used by Voyado) |
+| `v1/user-meta` | Per-user metadata (wishlist, recommendations) |
+| `v1/trustpilot/...` | Product and store reviews |
+| `v1/google-feed`, `v1/google-sitemap` | Feeds consumed by Google |
+
+The BFF reads/writes MongoDB for config and anything that needs caching, and fans out to third parties (Centra, Storyblok, Algolia, Voyado, Trustpilot, GrowthBook) so the browser only talks to one place.
+
+### How the client reaches it
+
+Always via the gears-configuration helpers — never a hard-coded URL:
+
+```tsx
+import { useGearsServiceUrl, useGearsConfigurationVariable } from "@made-people/gears-configuration";
+import { BffClient } from "@made-people/gears-bff-client";
+
+const bffUrl = useGearsServiceUrl("bff");
+const tenantId = useGearsConfigurationVariable("tenantId");
+const bff = new BffClient({ baseUrl: bffUrl, tenantId });
+```
+
+The client URL is built from your four env vars (section 5). `BffClient` attaches `x-tenant-id` automatically and proxies Cloudflare/Fastly geo headers through so the BFF can do country-aware lookups.
+
+### Running it locally
+
+You only need to run the BFF yourself if you're editing BFF code or debugging a response. Most client work uses the shared test BFF.
+
+```bash
+cd src/services/nestjs/nestjs-bff-service
+cp env-dist .env     # ADMIN_API_KEY, PORT=8082, Mongo driver flag
+npm run start:dev
+```
+
+Then point your client at it via `LOCAL_SERVICES=bff` (section 5). If the request is failing, check that `bff-service` is running on `PORT` and that the client resolved the right URL — log `bffUrl` from `useGearsServiceUrl("bff")` to confirm.
+
+### BFF gotchas
+
+- **Blank page, root loader returns `null`.** BFF didn't return a `settingsAndContentResponse` for this host. Check the BFF logs, confirm the site exists for this domain, and verify `x-tenant-id` is set.
+- **CORS or 401 from the BFF.** `tenantId` is missing or wrong in `gearsRootLoader`. Inspect `rootLoaderData.gearsConfiguration` in the browser devtools.
+- **Local BFF unreachable.** `LOCAL_SERVICES=bff` is only honored when `GEARS_RUN_MODE=local`. Cluster mode bypasses the override.
+
+## 7. Dev servers
 
 Pick the target that matches what you're working on:
 
@@ -78,7 +175,7 @@ Pick the target that matches what you're working on:
 
 All dev servers hot-reload. If a change to a grease package isn't picked up, make sure you built that package (`cd` into it and `npm run build`) — the dev server reads the built output, not the source.
 
-## 6. Testing
+## 8. Testing
 
 Two workflows depending on scope:
 
@@ -94,7 +191,7 @@ rush test --to <package-name>
 
 Per-job logs land in `./tmp/logs/$jobNumber.log`. Open them when something fails; the parallel runner only shows summaries.
 
-## 7. The merge-request workflow
+## 9. The merge-request workflow
 
 Every MR needs a changelog entry. Rush will reject the merge without one.
 
@@ -117,7 +214,7 @@ git push
 
 Use `rush change --bulk` if your MR touches many packages and a single message covers them all.
 
-## 8. Repo layout
+## 10. Repo layout
 
 The directories you'll touch most:
 
@@ -135,7 +232,7 @@ The directories you'll touch most:
 
 Published packages use the `@made-people/` scope. Package names should make sense outside the monorepo — e.g. `grease-cart` not `cart`.
 
-## 9. VS Code setup
+## 11. VS Code setup
 
 Open the generated workspace file, not the folder directly:
 
