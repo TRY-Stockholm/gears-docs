@@ -1,0 +1,257 @@
+---
+title: The BFF
+description: The Backend-for-Frontend service every Gears client talks to — architecture, endpoints, caching, configuration, and how to extend it
+---
+
+## What you'll learn
+
+What the BFF is, every public endpoint it exposes, how it caches responses, what it reads from config and env, and how to extend it with a new route or collector.
+
+## What the BFF is
+
+The **BFF** (Backend-for-Frontend) is the single API a Gears client talks to for anything that isn't the Centra checkout. It's a NestJS app that fans out to Centra, Storyblok, Algolia, GrowthBook, Voyado, Trustpilot, Depict, Ingrid, and Google — caches the results in MongoDB — and returns a shape tailored for the client.
+
+Why have it:
+
+- **One endpoint instead of five.** The browser makes one request per page; the BFF parallelises fetches, merges configs, and reshapes payloads.
+- **Tenant-aware.** Every response is resolved against a single `x-tenant-id` so one deployment serves many clients.
+- **Cached.** The SWR cache sits in front of every expensive call, with background revalidation.
+- **Secret-bearing.** Trustpilot, Voyado, Centra GraphQL, and GrowthBook keys never leave the cluster.
+
+The service lives at `src/services/nestjs/nestjs-bff-service/`. The client lives at `src/legacy/data-components/gears-bff-client/`.
+
+## Architecture
+
+- **NestJS + Fastify.** Entry at `src/main.ts`: `createGearsApp(BffModule).listen(PORT ?? 8080)`. OpenTelemetry is started before Nest.
+- **Module graph.** `BffModule` imports `EverythingModule` (all providers and repositories), `ControllersModuleV1`, `CentraModule`, `StoryblokModule`, and `CoreModule` from `@made-people/gears-nestjs-core`.
+- **Routing.** `RouterModule` prefixes every v1 controller under `/v1`. Admin routes live at `/v1/admin/...`.
+- **Middleware.** Every route except `/health` goes through `TenantAwareMiddleware` (resolves tenant from `x-tenant-id` or host). `/admin/*` routes additionally pass through `ApiKeyAuthMiddleware`.
+- **Build.** The Dockerfile uses `@vercel/ncc` to compile the whole service into a single JS file so cold starts are fast. Side effect: stack traces are hard to read in production.
+- **Storage.** MongoDB — every collector and every SWR cache entry lives there.
+
+## Public endpoints (`/v1`)
+
+Grouped by concern. Every route is served from a controller in `src/controllers/v1/frontend/`.
+
+### Site and page
+
+| Route | Method | Purpose |
+|---|---|---|
+| `v1/site/settings-and-content/:siteSlug` | GET | **The root loader's request.** Returns `frontendContext`, `translations`, global Storyblok stories, `gtm`, `ingrid`, `depict`, `growthbook`, `sites`, `imgproxyBaseUrl`, `centraCheckoutApiBaseUrl` |
+| `v1/site/settings-and-content/storyblok-preview` | GET | Same payload but using the default site — used by the live preview flow |
+| `v1/site/frontend-context` | GET | Frontend context by `countryCode` + `languageCode` |
+| `v1/page/*` | GET | Page lookup by URL path — returns a typed `StoryblokPage`, `CentraProductPage`, or redirect |
+| `v1/page/storyblok-preview/*` | GET | Preview variant of the page lookup (reads from Storyblok draft API) |
+| `v1/page/storyblok-preview/resolve-story` | POST | Resolves relations inside a preview story |
+| `v1/page/find-alternate-link/*` | POST | Language/country alternates for a given slug |
+
+### Centra
+
+| Route | Method | Purpose |
+|---|---|---|
+| `v1/centra/selection/:apiToken?` | GET | Initializes a Centra selection (cart) for a `frontendContext` |
+| `v1/centra/products-search` | POST / GET | Faceted product search (used by PLP and recommendations) |
+| `v1/centra/shipping-options` | GET | Shipping-method lookup |
+
+### Storyblok external JSON (datasources)
+
+One controller, many GETs, all served from MongoDB-cached Storyblok datasources. Use these to hydrate selects without round-tripping Storyblok on every request:
+
+`countries`, `markets`, `pricelists`, `categories`, `category-uris`, `languages`, `collections`, `custom-attributes/:attribute`, `default-language-attributes/:attribute`, `attributes/:attribute`, `centra-shipping-methods`, `growthbook/experiments`, `centra/filterable-fields`, `depict/listings`.
+
+### Storyblok stories
+
+| Route | Method | Purpose |
+|---|---|---|
+| `v1/storyblok-stories/by-component/:languageCode/:componentType` | GET | All stories of a given component type, localized |
+| `v1/storyblok-stories/by-folder/:siteSlug` | GET | All stories under a site folder |
+
+### Google
+
+| Route | Method | Purpose |
+|---|---|---|
+| `v1/google-sitemap/robots-txt` | GET | `robots.txt` |
+| `v1/google-sitemap/index` | GET | Sitemap index XML |
+| `v1/google-sitemap/products/:siteSlug` | GET | Product sitemap |
+| `v1/google-sitemap/links/:siteSlug` | GET | Link sitemap |
+| `v1/google-shopping/:siteSlug` | GET | Google Shopping feed |
+| `v1/google-shopping/:siteSlug/list-invalid-products` | GET | Debug view of feed exclusions |
+
+### Trustpilot, ecomid, user meta
+
+| Route | Method | Purpose |
+|---|---|---|
+| `v1/trustpilot/store-reviews` | GET / POST | Business-unit reviews |
+| `v1/trustpilot/store-summary` | GET | Store rating summary |
+| `v1/trustpilot/product-reviews` | GET / POST | Product reviews |
+| `v1/trustpilot/product-summary` | GET | Product rating summary |
+| `v1/ecomid/sessions` | POST | Issues an ecomid token (used by Voyado's iframe flow) |
+| `v1/user-meta` | GET | Per-user metadata (wishlist, recommendations) |
+
+### Health
+
+`GET /health` — cluster readiness check, skipped by tenant middleware.
+
+## Admin endpoints (`/v1/admin`)
+
+Admin routes are authenticated with `ApiKeyAuthMiddleware`. Set `x-admin-api-key` to the value of `admin.apiKey` in tenant config.
+
+### Cache collector
+
+`/v1/admin/cache-collector` — on-demand MongoDB population. Useful after a Centra import or Storyblok bulk edit:
+
+`PUT centra/categories`, `PUT centra/shipping-options`, `PUT centra/countries`, `PUT centra/languages`, `PUT centra/markets`, `PUT centra/pricelists`, `PUT centra/products`, `PUT centra/products/:productId`, `PUT centra/translated-fields`, `PUT storyblok/tags`, `PUT storyblok/datasources`, `PUT storyblok/links`, `PUT storyblok/space`, `PUT storyblok/stories`, `PUT storyblok/stories/:storyId`, `PUT sites`, `PUT urls`, `PUT collect-everything`, `GET status/:id`.
+
+### Mongo maintenance
+
+`PUT /v1/admin/mongodb/create-indexes/all` — ensures all indexes exist.
+
+## Caching
+
+The BFF uses the **SWR cache** from `@made-people/gears-nestjs-core`. Controllers opt in with `@SwrCache({ staleMs, ttlMs })` + `@UseInterceptors(SwrCacheInterceptor)`. Example from `site-controller-v1.ts`:
+
+```ts
+@SwrCache({
+  staleMs: 5 * 60_000,          // revalidate in background after 5 min
+  ttlMs: 1000 * 60 * 60 * 24,   // delete from mongo after 24 h
+})
+@Get("/settings-and-content/:siteSlug")
+public async get(...) { ... }
+```
+
+- **Within `staleMs`** — response is served from Mongo immediately.
+- **Between `staleMs` and `ttlMs`** — stale response served immediately, a background revalidation runs.
+- **After `ttlMs`** — cache entry is removed and the next request waits for a fresh fetch.
+
+Cache is enabled per-tenant via `modules.core.swrCache.enabled`. When off, the interceptor is a no-op.
+
+## Configuration
+
+All behavior is driven by a Zod-validated config document loaded by `configDriverFactory()` (the Mongo config driver in production). The schema is in `src/configuration-schema.ts` — top-level keys:
+
+- `storyblok` — which field holds the breadcrumb label
+- `imgProxy.url` — required
+- `frontend.fallbackBaseUrl`, `frontend.alwaysUseFallbackBaseUrl`, `frontend.headers.cacheControl`, `frontend.seo.*`
+- `admin.apiKey` — authenticates admin routes
+- `catalog.product.{uriField, mediaKey, associatedStoryblokStories, productSearchOptions}`
+- `site.{defaultLanguageCode, globalStoryblokStories, redirectDomainList, redirectTldToSiteSlug, siteSlugRedirects}` — **deprecated** in favor of `sites` (multi-site)
+- `sites` — per-site context (`siteSlug` → `frontendContext`)
+- `urls` — URL resource definitions (CMS slugs, redirects, canonicals)
+- `tracking.gtm.containerIds`, `tracking.feeds.google`
+- `ingrid`, `depict`, `ecomid`, `trustpilot`, `checkout` — per-integration
+- `growthbook` — GrowthBook public config
+- `modules` — per-Nest-module config (e.g. `modules.core.swrCache.enabled`, `modules.centra.apiClients.checkoutApi.baseUrl`)
+
+The config document is tenant-aware. Each tenant has its own.
+
+## Environment
+
+The BFF reads very few env vars directly — most settings come from the config driver. What you'll see in `env-dist`:
+
+```bash
+ADMIN_API_KEY=x                     # fallback admin key when config is missing
+PORT=8082                           # server port (defaults to 8080)
+MONGOOSE_CONFIG_DRIVER_ENABLED=1    # use Mongo config driver
+```
+
+Add the following in your own `.env` when running locally:
+
+- **Mongo connection string** — consumed by `nestjs-core-module`'s config service.
+- **`GEARS_ENVIRONMENT`** — feeds logs and the `x-gears-environment` trace header.
+
+## The BffClient
+
+Frontends never call the BFF with `fetch` directly. Use `@made-people/gears-bff-client`:
+
+```ts
+import { BffClient } from "@made-people/gears-bff-client";
+
+const bff = new BffClient({
+  baseUrl: useGearsServiceUrl("bff"),
+  tenantId: useGearsConfigurationVariable("tenantId"),
+});
+```
+
+Every method returns `T | undefined` instead of throwing — a failed BFF call should never crash the client. `validateStatus` accepts anything under 500, and the catch block logs a structured error and returns `undefined`.
+
+### Methods
+
+| Method | Hits | Returns |
+|---|---|---|
+| `initializeSelection(frontendContext, apiToken?)` | `v1/centra/selection/:apiToken` | `SelectionResponse` |
+| `fetchFrontendProducts(data)` | `v1/centra/products-search` | `CentraProductsResponseV1` |
+| `findPage({ url, headers })` | `v1/page/:pathname` | `FindPageResponseV1` |
+| `findSiteContent(localeSlug, headers)` | `v1/site/settings-and-content/:slug` | `FindSiteSettingsAndContentResponseV1` |
+| `findFrontendContextByCountryAndLanguageCode(c, l)` | `v1/site/frontend-context` | `FrontendContextResponseV1` |
+| `findAlternateLinkForSlug({ fullSlug, targetFrontendContext })` | `v1/page/find-alternate-link/:slug` | `FindAlternateLinkResponseBodyV1` |
+| `findRobotsTxt({ headers })` | `v1/google-sitemap/robots-txt` | `RawResponsePage` |
+| `findSitemapIndex({ headers })` | `v1/google-sitemap/index` | `RawResponsePage` |
+| `findSitemap({ type, slug, headers })` | `v1/google-sitemap/:type/:slug` | `RawResponsePage` |
+| `fetchEcomIdToken(customerId)` | `v1/ecomid/sessions` | `string` |
+| `resolveStoryblokStory({ story, frontendContext })` | `v1/page/storyblok-preview/resolve-story` | `StoryblokPage["storyblokData"]` |
+| `getUserMeta()` | `v1/user-meta` | `GetUserMetaResponseV1` |
+| `fetchTrustpilot*` (4 methods) | `v1/trustpilot/*` | Trustpilot response DTOs |
+
+There's also a singleton helper, `getBffClient()`, which constructs the client lazily from `getGearsServiceUrl("bff")` and the tenant id. Prefer it on the server (loaders) — use the hook-constructed form in React.
+
+### Headers the BFF honors
+
+`BffClient` automatically attaches:
+
+- **`x-tenant-id`** — resolves the tenant. Required.
+- **`gears-host`** — set from the incoming `host` header so multi-domain lookups work.
+- **`x-forwarded-host`** — mirrored from `host` when not already present.
+- **`x-forwarded-*`** — every `x-forwarded-*` header is passed through (preserves original scheme, proto, etc.).
+- **`x-campaign-site-key`** — lets the BFF resolve a campaign site overlay.
+- **`cf-ipcountry`, `cf-connecting-ip`, `fastly-geoip-countrycode`** — geo signals used for country-specific redirects and feeds.
+
+## Extending the BFF
+
+### Add a new v1 endpoint
+
+1. **Create the controller** under `src/controllers/v1/frontend/`. Follow the neighbors — e.g. `trustpilot-controller-v1.ts`.
+2. **Register it** in `src/controllers/v1/controllers.module.v1.ts`.
+3. **Type the response** in `src/controllers/v1/dto/` and export the DTO from `src/index.ts` so `@made-people/nestjs-bff-service` ships it.
+4. **Cache it** with `@SwrCache` + `@UseInterceptors(SwrCacheInterceptor)` if the fetch is expensive.
+5. **Add a method on `BffClient`** so clients don't craft URLs by hand.
+
+### Add a cache collector
+
+Follow the pattern in `admin-cache-collector.controller.ts`: inject the collector from its vendor module and expose a `PUT` that calls `collector.collect()`. Then include the new step in `collect-everything`.
+
+### Change the config schema
+
+Edit `src/configuration-schema.ts`. The schema is `bffConfiguration` (Zod). Any change here is validated at boot — misconfigured tenants fail fast.
+
+## Running it locally
+
+Most client work uses the shared test BFF. You only need a local instance when editing BFF code:
+
+```bash
+cd src/services/nestjs/nestjs-bff-service
+cp env-dist .env
+npm run start:dev          # or: rush build:watch for deps
+```
+
+Then point a client at it by adding `LOCAL_SERVICES=bff` to the client's `.env` (see [Getting Started §5](./getting-started)). The client resolves `bff` to `https://<tenant>.bff.local.<GEARS_DOMAIN>:8080`.
+
+## Gotchas
+
+- **Blank page, root loader returns `null`.** The BFF did not return a `settingsAndContentResponse` for this host/siteSlug. Check the BFF logs, confirm the site exists in the `sites` config, and verify `x-tenant-id` is set.
+- **`"Centra checkout API base URL is missing"` 503.** `modules.centra.apiClients.checkoutApi.baseUrl` is unset in config. Fix the tenant's config document.
+- **401 from `/v1/admin/*`.** Missing or wrong `x-admin-api-key`. Must match `admin.apiKey` in config (env `ADMIN_API_KEY` is a fallback, not the normal path).
+- **Stale data after a Centra import.** Hit the right collector (`PUT /v1/admin/cache-collector/centra/products`) — the SWR background revalidation only runs when a request actually arrives.
+- **Local BFF unreachable from client.** `LOCAL_SERVICES=bff` is only honored when `GEARS_RUN_MODE=local`. Cluster mode bypasses the override.
+- **ncc-compiled stack traces.** When a 500 happens in production, line numbers point into the single compiled `dist/index.js`. Source maps help but aren't always available — add `logger.error(..., { error })` generously.
+- **Tenant middleware on every route.** If you see "Tenant could not be resolved", your request is missing `x-tenant-id` or arriving on a host that isn't mapped.
+
+## Related packages
+
+- `@made-people/gears-bff-client` — the `BffClient` and fetch helpers
+- `@made-people/nestjs-bff-service` — the BFF itself; also exports every public DTO (`FrontendContextV1`, `FindPageResponseV1`, `StoryblokPage`, `CentraProductPage`, `CentraProductsResponseV1`, `FindSiteSettingsAndContentResponseV1`, Trustpilot DTOs, etc.)
+- `@made-people/gears-nestjs-core` — `CoreModule`, `SwrCache`, `SwrCacheInterceptor`, `TenantAwareMiddleware`, `ApiKeyAuthMiddleware`, `ConfigProvider`, `useZodValidator`
+- `@made-people/nestjs-centra-module` — Centra integration and all Centra collectors
+- `@made-people/nestjs-storyblok-module` — Storyblok integration and all Storyblok collectors
+- `@made-people/gears-configuration` — `getGearsServiceUrl("bff")`, `getGearsConfigurationVariable("tenantId")`
+
+**Next:** [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [Centra](./centra) · [Storyblok](./storyblok)
