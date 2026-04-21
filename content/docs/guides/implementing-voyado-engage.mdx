@@ -1,0 +1,149 @@
+---
+title: Implementing Voyado Engage
+description: Wire up Voyado Engage in a client frontend for customer identification, newsletter, promotions, and tracking
+---
+
+## What this guide covers
+
+How to mount `@made-people/grease-voyado-engage` in a React client frontend so you can identify contacts, run newsletter sign-up through Voyado, surface contact-bound promotions, and emit product/cart tracking events into Voyado Engage.
+
+## Prerequisites
+
+- A React client frontend that can import `@made-people/grease-voyado-engage`
+- A Voyado tenant with an Engage API base URL (typically resolved through your gears service config)
+- Voyado's tracking script loaded on the page so `window.va()` is defined (usually a `<script>` tag injected server-side or via your CMS)
+- The sibling grease packages this provider integrates with: `grease-cart`, `grease-newsletter`, `grease-order`, `grease-product`, `grease-back-in-stock`, `grease-account` (exact peer versions are listed in the package's `peerDependencies`)
+
+## Install
+
+```bash
+bun add @made-people/grease-voyado-engage
+```
+
+Install every peer dep listed in the package's `peerDependencies` at the required version range — missing peers will break the Provider at runtime (notably `@made-people/voyado-engage-api`, `@made-people/grease-cart`, `@made-people/grease-newsletter`, `@made-people/grease-order`, `@made-people/grease-product`, `@made-people/grease-back-in-stock`, plus `react`, `uuid`, and `zod`).
+
+## Create the Voyado API client
+
+```tsx
+import { createVoyadoEngageClient } from "@made-people/voyado-engage-api";
+
+const voyadoEngageClient = createVoyadoEngageClient({
+  baseUrl: "https://engage.example.com",
+});
+```
+
+In production, resolve `baseUrl` from your gears service config (e.g. `useGearsServiceUrl("engage")`) instead of hard-coding it.
+
+## Wire up the provider
+
+```tsx
+import {
+  VoyadoEngageProvider,
+  type VoyadoEngageProviderProps,
+} from "@made-people/grease-voyado-engage";
+
+const voyadoEngageBootstrapProps: VoyadoEngageProviderProps = {
+  frontendContext: {
+    marketId: frontendContext.market,
+    countryCode: frontendContext.country,
+    marketName: frontendContext.marketName ?? "SE",
+    language: voyadoEngageLanguageMapper(frontendContext.country),
+    baseUrl: frontendContext.baseUrl,
+    siteSlug: frontendContext.siteSlug,
+    cartReference: centraTokenHandler.getToken() ?? "",
+    engageLocale: voyadoEngageLocaleMapper(frontendContext.country ?? "se"),
+  },
+  apiClient: voyadoEngageClient,
+  discoveryKey: getSetVoyadoCustomerKey(),
+  setDiscoveryKey: (key) => setVoyadoCustomerKey(key),
+  withTracking: true,
+  softIdentification: { encryptedContactId: eclub },
+};
+
+<VoyadoEngageProvider {...voyadoEngageBootstrapProps}>
+  {children}
+</VoyadoEngageProvider>;
+```
+
+`marketId`, `countryCode`, `marketName`, `baseUrl`, and `siteSlug` come from your `FrontendContextV1` (BFF). `discoveryKey` and `cartReference` come from your own localStorage helpers. `language` / `engageLocale` come from client-specific mappers — the package does not export them, so each client implements its own.
+
+## Use it: newsletter signup
+
+```tsx
+import { VoyadoEngageNewsletterClient } from "@made-people/grease-voyado-engage";
+import type { NewsletterProviderProps } from "@made-people/grease-newsletter";
+
+const newsletterProviderProps: NewsletterProviderProps = {
+  newsletterClientDriver: new VoyadoEngageNewsletterClient(
+    voyadoEngageClient,
+    {
+      market: frontendContext.marketName ?? "SE",
+      countryCode: frontendContext.country,
+      contactType: "member",
+      withTracking: true,
+      preferences: { acceptsEmail: true, acceptsSms: true },
+      attributes: { lang: voyadoEngageLanguageMapper(frontendContext.country) },
+      discoveryKey: getSetVoyadoCustomerKey(),
+    },
+    { setDiscoveryKey: (key) => setVoyadoCustomerKey(key) },
+  ),
+};
+```
+
+## Use it: promotions hook
+
+```tsx
+import { useVoyadoEngageContactPromotions } from "@made-people/grease-voyado-engage";
+
+function PromotionList() {
+  const {
+    promotions,
+    addEngagePromotionCodeToCart,
+    removeEngagePromotionCodeFromCart,
+  } = useVoyadoEngageContactPromotions();
+
+  return promotions.map((promo) => (
+    <button
+      key={promo.promotionId}
+      onClick={() =>
+        addEngagePromotionCodeToCart(promo.voucherCode, promo.promotionId)
+      }
+    >
+      Apply {promo.voucherCode}
+    </button>
+  ));
+}
+```
+
+Promotions are auto-fetched for the logged-in contact and filtered to ECOM-redeemable. Note that `voucherCode` (user-entered) and `promotionId` (Voyado's internal ID) are distinct — both are required to apply a code.
+
+## Use it: tracking events
+
+```tsx
+import { engageTrackProductView } from "@made-people/grease-voyado-engage";
+
+engageTrackProductView({ product, frontendContext });
+```
+
+Tracking only works if the product carries a `voyadoEngageTracking` attribute (`{ productId: string; category?: string }`) in its product data — this is typically wired via a Centra attribute.
+
+## Gotchas
+
+- `window.va` must be loaded separately (a tracking `<script>` from Voyado). Tracking calls retry for up to 1 second waiting for it and then silently drop.
+- Products must expose a `voyadoEngageTracking` attribute or product view tracking logs a warning and does nothing.
+- `voyadoEngageLanguageMapper` / `voyadoEngageLocaleMapper` are not exported — each client implements its own country-to-language/locale mapping.
+- `discoveryKey` is a session-level identifier stored in localStorage, not a durable customer ID. Clearing storage resets it.
+- `?eclub=<id>` soft identification only fires if you pass the `softIdentification` prop to the Provider; the URL param alone is ignored.
+- `VoyadoEngageNewsletterClient.unsubscribe()` is not implemented — it throws.
+
+## Related packages
+
+- `@made-people/grease-newsletter` (consumed via `VoyadoEngageNewsletterClient`)
+- `@made-people/grease-back-in-stock` (consumed via `VoyadoEngageBackInStockClient`)
+- `@made-people/grease-account` (consumed via `VoyadoEngageCentraAccountDriver`)
+
+## Troubleshooting
+
+- **Tracking calls silently fail:** the Voyado tracking script isn't loaded. Verify `window.va` is defined on pageload; calls are wrapped in a 1-second timeout waiting for it.
+- **Product view not tracked:** the product is missing the `voyadoEngageTracking` attribute — check your product data source (Centra attributes, Storyblok, etc.).
+- **Soft identification does nothing:** you didn't pass the `softIdentification` prop to the Provider. The `?eclub=` URL param is read only when that prop is set.
