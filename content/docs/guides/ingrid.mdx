@@ -1,0 +1,98 @@
+---
+title: Implementing Ingrid
+description: Wire up Ingrid shipping widget and delivery options in a client frontend checkout
+---
+
+## What this guide covers
+
+How to mount `@made-people/grease-ingrid` in a React client frontend so you can render Ingrid's delivery upsell widget in the mini-cart and checkout, surface the Ingrid delivery selector inside a Centra checkout, and render Ingrid's delivery tracking and returns widgets on CMS pages.
+
+## Prerequisites
+
+- A React client frontend that can import `@made-people/grease-ingrid`
+- An Ingrid tenant with `siteId`, a CDN base URL (`cdnBaseUrl`), and a `upsellWidgetToken` — all three flow through the BFF via `IngridPublicConfig` (`src/services/nestjs/nestjs-bff-service/src/controllers/v1/dto/public-config/ingrid-public-config.ts`) and land on `settingsAndContentResponse.ingrid`
+- A `@made-people/grease-cart` provider higher in the tree (`useCartState` is consumed by the upsell widget)
+- A `@made-people/grease-countries-and-languages` provider higher in the tree (`useCountriesAndLanguages` drives country/locale)
+- Peer deps installed: `@made-people/grease-cart ~0.20.4`, `react 18.2.0`, `react-dom 18.2.0`, `zod ^3.22.4`
+
+## Install
+
+```bash
+bun add @made-people/grease-ingrid
+```
+
+## Wire up the provider
+
+The dedicated client mounts `IngridProvider` near the top of its provider tree (`client-frontends/dedicated/app/project/bootstrap/bootstrap.tsx`):
+
+```tsx
+import { IngridProvider } from "@made-people/grease-ingrid";
+
+<IngridProvider
+  siteId={rootLoaderData.settingsAndContentResponse.ingrid?.siteId}
+  cdnBaseUrl={rootLoaderData.settingsAndContentResponse.ingrid?.cdnBaseUrl}
+  upsellWidgetToken={
+    rootLoaderData.settingsAndContentResponse.ingrid?.upsellWidgetToken
+  }
+  currencyCode={frontendContext.currencyCode}
+  searchParams={searchParams}
+>
+  {children}
+</IngridProvider>;
+```
+
+All five props come straight from BFF/route data — no client-specific mapper is needed. `searchParams` lets the tracking and returns widgets prefill order number and email from the URL.
+
+## Mount the delivery upsell widget in the mini-cart and checkout
+
+```tsx
+import { IngridDeliveryUpsellWidget } from "@made-people/grease-ingrid";
+
+<IngridDeliveryUpsellWidget />;
+```
+
+Drop it anywhere under `IngridProvider`. The dedicated and Stronger clients mount it in the mini-cart (`client-frontends/<client>/app/project/blueprint/components/mini-cart/default-props.tsx`). Stronger additionally mounts it above the cart summary on the checkout index route (`client-frontends/stronger/app/gears/routes/checkout-index-route.tsx`).
+
+The component loads `${cdnBaseUrl}/upsell-widget/bootstrap.js`, instantiates `new window.ingrid.upsell(...)`, and re-calls `widget.updateCart(payload)` whenever the cart changes. The payload's `total_value` is `round((grandTotal - shipping) * 100)` — minor units, shipping excluded (`src/frontend/grease/ingrid/src/utils/upsell-payload.ts`).
+
+## Read the shipping selection (Centra)
+
+`grease-ingrid` itself does not expose a shipping-selection hook. The actual Ingrid checkout selector is rendered by `@made-people/grease-centra` via `CentraCheckoutShippingIngrid` (`src/frontend/grease/centra/src/checkout/components/shipping/methods/centra-checkout-shipping-ingrid.tsx`), which reads the HTML snippet from `selection.pluginFields.ingrid` (or `.shipwallet` for V1), renders it, and subscribes to Ingrid's session API with `window._sw(api => api.on("data_changed", handler))`. On change it emits `shippingMethodSelected` through `useCheckoutEventEmitter()` from `@made-people/grease-checkout`.
+
+## Tracking and returns widgets
+
+```tsx
+import {
+  IngridDeliveryTrackingWidget,
+  IngridReturns,
+} from "@made-people/grease-ingrid";
+
+<IngridDeliveryTrackingWidget />
+<IngridReturns id="your-ingrid-returns-org-id" />
+```
+
+Tracking needs `siteId` + `cdnBaseUrl` on the provider; it loads `${cdnBaseUrl}/delivery-tracking/bootstrap.js` and calls `window.IngridDeliveryTrackingWidgetApi.renderSearchMode({ containerId: "delivery-tracking-widget", locale, siteId, prefillIdentifier, prefillContact })`. Prefills come from `searchParams.get("order")` / `searchParams.get("email")`. Stronger registers both as Storyblok components (`client-frontends/stronger/app/project/storyblok-components.ts`).
+
+`IngridReturns` renders an iframe at `https://returns.ingrid.com/{id}` — the base URL is hard-coded.
+
+## Gotchas
+
+- `useIngrid()` throws outside `IngridProvider`.
+- `IngridDeliveryUpsellWidget` needs `cart.currencyCode` or a `currencyCode` prop on the provider — it logs an error and renders nothing otherwise.
+- The upsell `total_value` excludes shipping — Ingrid receives a product subtotal, not the grand total.
+- Missing `upsellWidgetToken` logs a warning and renders nothing.
+- `IngridReturns` has no prop for the returns base URL.
+
+## Related packages
+
+- `@made-people/grease-cart` — `useCartState` feeds the upsell payload
+- `@made-people/grease-countries-and-languages` — `useCountriesAndLanguages` provides country and locale
+- `@made-people/grease-centra` — hosts `CentraCheckoutShippingIngrid` and emits `shippingMethodSelected`
+- `@made-people/grease-checkout` — `useCheckoutEventEmitter` exposes checkout lifecycle events
+
+## Troubleshooting
+
+- **Upsell widget never renders:** check that `upsellWidgetToken` and `cdnBaseUrl` land on the provider — both come from `settingsAndContentResponse.ingrid`. A missing token is only a console warning.
+- **Widget renders but shows no data:** cart currency is unresolved. Set `currencyCode` on the provider, or ensure the cart carries `currencyCode`.
+- **Tracking widget does nothing:** `siteId` or `cdnBaseUrl` is missing — the component console-errors and returns `null`. Prefills require `?order=` / `?email=` in `searchParams`.
+- **Shipping selection not captured in checkout:** you need `CentraCheckoutShippingIngrid` mounted; `grease-ingrid` alone does not emit selection events.

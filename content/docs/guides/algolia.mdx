@@ -1,0 +1,137 @@
+---
+title: Implementing Algolia
+description: Wire up Algolia search in a client frontend for instant product search, filters, and suggestions
+---
+
+## What this guide covers
+
+How to mount `@made-people/grease-algolia` in a React client frontend for instant product search, autocomplete, faceted filters, Algolia Recommend, and automatic Algolia Insights events from product, cart, and order activity.
+
+## Prerequisites
+
+- React client frontend importing `@made-people/grease-algolia`
+- `@made-people/grease-search` mounted (`<SearchProvider>`) — owns search state, facets, autocomplete
+- Algolia application ID, search-only API key, and index name — resolved via `useGearsServiceUrl("algolia")` (e.g. `/algolia/v2/context/products?market=…&language=…`)
+- `grease-product`, `grease-cart`, `grease-order` — emitters feed Insights
+
+## Install
+
+```bash
+bun add @made-people/grease-algolia
+```
+
+Install the peer deps (`@made-people/grease-search`, `@made-people/grease-product`, `@made-people/managed-props`, `react`, `react-dom`, `zod`) and the Algolia SDKs: `algoliasearch`, `@algolia/client-insights`, `@algolia/recommend`.
+
+## Configure the search client
+
+`AlgoliaProvider` takes an async `algoliaClientDataGetter` that returns the three Algolia clients plus the index name:
+
+```ts
+import algoliasearch from "algoliasearch/lite";
+import { insightsClient } from "@algolia/client-insights";
+import recommend from "@algolia/recommend";
+
+export const getAlgoliaClient = async (language, market, algoliaServiceUrl) => {
+  const { application_id, search_api_key, index_name } = await fetchConfig(
+    algoliaServiceUrl,
+    { market, language },
+  );
+  return {
+    searchClient: algoliasearch(application_id, search_api_key),
+    insightsClient: insightsClient(application_id, search_api_key),
+    recommendClient: recommend(application_id, search_api_key),
+    indexName: index_name,
+  };
+};
+```
+
+## Wire up the provider
+
+```tsx
+import {
+  AlgoliaProvider,
+  AlgoliaAutoCompleteProvider,
+  type AlgoliaProviderProps,
+} from "@made-people/grease-algolia";
+
+const algoliaProviderProps: AlgoliaProviderProps = {
+  algoliaClientDataGetter: () =>
+    getAlgoliaClient(language, market, algoliaBaseUrl),
+  algoliaConfig: {
+    mappers: {
+      centraShopProduct: myCentraShopProductMapper,
+      algoliaFacetToGreaseFacetValue: myFacetValueMapper,
+      resolveFacetValueForFilter: (facetId, valueId) => valueId,
+    },
+    insights: algoliaUserToken ? { userToken: algoliaUserToken } : undefined,
+  },
+};
+
+<AlgoliaProvider {...algoliaProviderProps}>
+  <AlgoliaAutoCompleteProvider>{children}</AlgoliaAutoCompleteProvider>
+</AlgoliaProvider>;
+```
+
+Mount this inside `<SearchProvider>` from `grease-search`. When `insights.userToken` is set, `AlgoliaProvider` auto-renders `AlgoliaNotifications`, which subscribes to `productEventEmitter`, `cartEventEmitter`, and `orderEventEmitter` and sends `view` / `click` / `conversion` events to Algolia Insights.
+
+## Use it: instant search
+
+`AlgoliaSearchResultsProvider` plugs into `CachedSearchResultsProvider` from `grease-search`, so downstream hooks keep working:
+
+```tsx
+import {
+  AlgoliaSearchResultsProvider,
+  type AlgoliaSearchPayload,
+} from "@made-people/grease-algolia";
+
+const payload: AlgoliaSearchPayload = {
+  algoliaTypeId: "product",
+  searchQuery: q,
+  facetGroupConfigs,
+};
+
+<AlgoliaSearchResultsProvider payload={payload}>
+  <Search searchTerm={q} />
+</AlgoliaSearchResultsProvider>;
+```
+
+## Use it: autocomplete
+
+`AlgoliaAutoCompleteProvider` wraps `AutoCompleteProvider` from `grease-search` via `AlgoliaAutoCompleteClient`. Any `useAutoComplete()` consumer then gets Algolia-backed product suggestions.
+
+## Use it: recommendations
+
+```tsx
+import { AlgoliaRecommendations } from "@made-people/grease-algolia";
+
+<AlgoliaRecommendations model="related-products" maxRecommendations={8}>
+  <RecommendationList />
+</AlgoliaRecommendations>;
+```
+
+Models: `related-products`, `bought-together`, `looking-similar`, `trending-items`, `trending-facets`. `objectID` is auto-resolved from `useMaybeProductBase()` or the first cart item when omitted.
+
+## Filters and facets
+
+Facet state is owned by `grease-search`. Selections are translated via `searchResultFacetsToAlgoliaFacetFilters` and applied through `performDisjunctiveSearch`. Pass `facetGroupConfigs` on the payload for grouped facets; set `algoliaConfig.mappers.resolveFacetValueForFilter` when display IDs differ from Algolia index values (e.g. JSON-encoded color swatches).
+
+## Gotchas
+
+- `AlgoliaSearchResultsProvider` only renders for `algoliaTypeId === "product"` — other values silently render nothing.
+- `AlgoliaRecommendations` returns `null` when results are empty; render an empty state outside it.
+- `AlgoliaClientDataGetter` may return `undefined` if the config fetch fails; search is silently disabled.
+- Insights only fire when `algoliaConfig.insights.userToken` is set — without it `AlgoliaNotifications` never mounts.
+- Product-context Recommend models (`related-products`, `bought-together`, `looking-similar`) need an `objectID`; on non-PDP pages, only `trending-*` work.
+
+## Related packages
+
+- `@made-people/grease-search` — required peer; hosts `SearchProvider`, `CachedSearchResultsProvider`, `AutoCompleteProvider`.
+- `@made-people/grease-product`, `@made-people/grease-cart`, `@made-people/grease-order` — event emitters `AlgoliaNotifications` subscribes to.
+- `@made-people/gears-configuration` — `useGearsServiceUrl("algolia")` to resolve credentials.
+
+## Troubleshooting
+
+- **Search returns nothing:** the `algoliaClientDataGetter` likely resolved to `undefined` (gears algolia service error). Verify the endpoint and credentials.
+- **Insights not sent:** `algoliaConfig.insights.userToken` is missing. Generate and persist a user token before rendering `AlgoliaProvider`.
+- **Recommendations render nothing:** either the model needs an `objectID` you didn't supply, or the result set is empty.
+- **Facet value mismatch:** supply `resolveFacetValueForFilter` to translate display IDs into Algolia index values.

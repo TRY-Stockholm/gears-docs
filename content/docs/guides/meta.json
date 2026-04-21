@@ -1,4 +1,12 @@
 {
   "title": "Guides",
-  "pages": ["implementing-voyado-engage"]
+  "pages": [
+    "implementing-voyado-engage",
+    "storyblok",
+    "centra",
+    "algolia",
+    "growthbook",
+    "gtm",
+    "ingrid"
+  ]
 }

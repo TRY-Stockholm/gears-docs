@@ -1,0 +1,171 @@
+---
+title: Implementing Centra
+description: Wire up Centra as the commerce backend for catalog, cart, checkout, and account in a client frontend
+---
+
+## What this guide covers
+
+How to mount `@made-people/grease-centra` in a React client frontend so Centra drives the cart, product search, and the customer account flow. The provider owns the Centra session, hydrates the cart on load, and exposes mappers that turn Centra's `CentraSelectionResponse` into grease-cart's `Cart` shape.
+
+## Prerequisites
+
+- A React client frontend that can import `@made-people/grease-centra`
+- A Centra tenant with a Checkout API base URL (resolved via your BFF response, e.g. `settingsAndContentResponse.centraCheckoutApiBaseUrl`)
+- A BFF that returns a `FrontendContextV1` with `market`, `pricelist`, `language`, `country`, `baseUrl`, `siteSlug`, and `currency`
+- The sibling grease packages this provider integrates with: `grease-cart`, `grease-order`, `grease-account`, `grease-search`, `grease-checkout`, `grease-customer` (exact peer versions are listed in the package's `peerDependencies`)
+
+## Install
+
+```bash
+bun add @made-people/grease-centra
+```
+
+Install every peer dep listed in the package's `peerDependencies` at the required version range — missing peers will break the Provider at runtime (notably `@made-people/centra-checkout-api`, `@made-people/grease-cart`, `@made-people/grease-checkout`, `@made-people/grease-customer`, `@made-people/grease-newsletter`, `@made-people/grease-order`, `@made-people/managed-props`, `@made-people/react-prop-guard`, `@made-people/typeguards-common`, plus `react`, `react-dom`, and `zod`).
+
+## Create the Centra client
+
+```tsx
+import {
+  createCentraCheckoutAPIClient,
+  CentraLocalStorageTokenHandler,
+} from "@made-people/centra-checkout-api";
+
+// 30-day TTL on the session token
+const centraTokenHandler = new CentraLocalStorageTokenHandler(
+  30 * 24 * 60 * 60 * 1000,
+);
+
+const centraCheckoutAPIClient = createCentraCheckoutAPIClient({
+  baseUrl: settingsAndContentResponse.centraCheckoutApiBaseUrl,
+  centraTokenHandler,
+});
+```
+
+The token handler persists the Centra session token in `localStorage` under `centra-api-token`. Its default TTL is one week; pass milliseconds to override.
+
+## Wire up the provider
+
+```tsx
+import {
+  CentraProvider,
+  CentraProviderProps,
+  CentraSearchProvider,
+  CentraSearchProviderProps,
+} from "@made-people/grease-centra";
+
+const centraProviderProps: CentraProviderProps = {
+  checkoutAPIClient: centraCheckoutAPIClient,
+  initializationType:
+    pageType === "checkoutFinalize" ? "dontInitialize" : "onLoad",
+  queryContext: {
+    market: frontendContext.market,
+    pricelist: frontendContext.pricelist,
+    language: frontendContext.language,
+    site: {
+      baseUrl: frontendContext.baseUrl,
+      slug: frontendContext.siteSlug,
+    },
+  },
+  mapperOptions: {
+    mappers: strongerCentraMappers,
+    options: {
+      productOptions: { productImageKey: PRODUCT_IMAGE_KEY_STRONGER },
+      context: {
+        currencyCode: frontendContext.currency.currency!,
+        countryCode: frontendContext.country!,
+      },
+    },
+  },
+};
+
+<CentraProvider {...centraProviderProps}>
+  <CentraSearchProvider searchFunctionGetter={searchFunctionGetter}>
+    {children}
+  </CentraSearchProvider>
+</CentraProvider>;
+```
+
+`CentraProvider` renders a `CentraGreaseCartProvider` internally, so `grease-cart` hooks (`useCartState`, etc.) work anywhere underneath it. `mapperOptions.mappers` is a partial — defaults fill in anything you omit.
+
+## Use it: cart operations
+
+You don't call Centra directly — consume `grease-cart` hooks. The `CentraCartClientDriver` is auto-mounted by the provider.
+
+```tsx
+import { useCartState } from "@made-people/grease-cart";
+
+const cart = useCartState();
+```
+
+Add-to-cart, voucher add/remove, quantity updates, and `fetchCart` all route through `CentraCartClientDriver` in `src/cart/centra-cart-client-driver.ts`.
+
+## Use it: product search
+
+```tsx
+import { CentraSearchProvider } from "@made-people/grease-centra";
+import { bffCentraSearch } from "@made-people/grease-bff";
+
+const centraSearchProviderProps: CentraSearchProviderProps = {
+  searchFunctionGetter: (payload) =>
+    bffCentraSearch(bffClient, payload, frontendContext, {
+      productMapper: frontendProductToGreaseProduct,
+    }),
+};
+```
+
+`searchFunctionGetter` is required. Most clients proxy through the BFF rather than calling Centra's search endpoint from the browser.
+
+## Use it: account driver
+
+```tsx
+import {
+  CentraAccountClient,
+  CentraAccountMappers,
+  centraCheckoutApiCustomerToGreaseCustomer,
+  makeCentraCheckoutApiOrderToGreaseOrderMapper,
+} from "@made-people/grease-centra";
+
+const mappers: CentraAccountMappers = {
+  orderMapper: makeCentraCheckoutApiOrderToGreaseOrderMapper(
+    mapperOptions,
+    clientMappers,
+  ),
+  customerMapper: centraCheckoutApiCustomerToGreaseCustomer,
+};
+
+const centraAccountClient = new CentraAccountClient(
+  centraCheckoutAPIClient,
+  mappers,
+  { resetPasswordUri: "forgot-password", resetPasswordData: { id, i } },
+);
+```
+
+Pass `centraAccountClient` as `accountClientDriver` on `AccountProvider` (or wrap it in `VoyadoEngageCentraAccountDriver` if you're also running Voyado).
+
+## Session tokens and checkout
+
+- The session token lives in `localStorage` via `CentraLocalStorageTokenHandler` and is sent on every Checkout API call.
+- The same token doubles as the "cart reference" for downstream integrations — the Stronger bootstrap passes `centraTokenHandler.getToken() ?? ""` into Voyado Engage's provider, with a source-code note that this is a provisional mapping.
+- On the checkout finalize page, pass `initializationType: "dontInitialize"` so the provider does **not** re-fetch the selection and overwrite the finalized-order state.
+
+## Gotchas
+
+- `initializationType: "onInteraction"` is declared but not implemented — it logs a `console.error` and does nothing. Use `"onLoad"` or `"dontInitialize"`.
+- `useCentraContext()` throws if called outside `CentraProvider`.
+- `CentraCartClientDriver.updateComment` throws `"Not Implemented"` — don't wire a cart-comment UI to it.
+- If `queryContext.site` is set, `addToCart` appends a `productUrl` (`{baseUrl}/{slug}/{product.slug}`) to the Centra request — omit `site` to skip that.
+- The token TTL default inside `CentraLocalStorageTokenHandler` is 1 week (`3600*24*7` seconds). Stronger overrides it to 30 days — pick a TTL that matches your abandoned-cart expectations.
+- `mapperOptions.mappers` is merged with defaults, but `mapperOptions.options` is required — missing `productImageKey` or `context.currencyCode` will break the product mapper at runtime.
+
+## Related packages
+
+- `@made-people/grease-cart` — consumed automatically via the internal `CentraGreaseCartProvider` and `CentraCartClientDriver`.
+- `@made-people/grease-order` — `makeCentraCheckoutApiOrderToGreaseOrderMapper` produces the order mapper the account client hands to `fetchOrders`.
+- `@made-people/grease-account` — pair `CentraAccountClient` with `AccountProvider` for login, register, reset-password, and order history.
+- `@made-people/centra-checkout-api` — the underlying HTTP client; `createCentraCheckoutAPIClient` and `CentraLocalStorageTokenHandler` come from here, not from grease-centra.
+
+## Troubleshooting
+
+- **Cart is empty after checkout finalize page loads:** you forgot `initializationType: "dontInitialize"` on that route — the provider re-fetched the Centra selection and replaced the finalized state. Gate on `pageType === "checkoutFinalize"`.
+- **`useCentraContext must be used within a CentraProvider`:** a consumer hook is rendering above `CentraProvider` in the tree. Check the provider order in your bootstrap.
+- **Product search returns nothing:** `searchFunctionGetter` isn't wired, or the BFF search route isn't proxying to Centra. `CentraSearchProvider` has no default — it requires an app-supplied getter.

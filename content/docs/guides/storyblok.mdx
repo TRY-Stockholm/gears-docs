@@ -1,0 +1,171 @@
+---
+title: Implementing Storyblok
+description: Wire up Storyblok CMS in a client frontend for content-driven pages, live preview, and localization
+---
+
+## What this guide covers
+
+How to mount `@made-people/grease-storyblok` in a React client frontend so stories fetched server-side render as React components, custom field transforms can rewrite blok trees before render, and the Storyblok visual editor updates the page live.
+
+## Prerequisites
+
+- A React client frontend that can import `@made-people/grease-storyblok`
+- A Storyblok space and access token (used wherever your BFF actually fetches stories — this package does **not** fetch)
+- A server-side story source — e.g. `@made-people/nestjs-bff-service` exposing `resolveStoryblokStory`, which is what stronger uses
+- The sibling grease packages you plan to wire as components (e.g. `blueprint-banner`, `blueprint-grid`, `grease-centra`, `grease-voyado-elevate`)
+
+## Install
+
+```bash
+bun add @made-people/grease-storyblok
+```
+
+Install every peer dep listed in the package's `peerDependencies` at the required version range — missing peers will break the Provider at runtime (`@made-people/flatten-object`, `@made-people/functions-traverse-and-replace`, `@made-people/react-prop-guard`, `@storyblok/js`, `react`, `react-dom`, `zod`).
+
+## Register your Storyblok components
+
+Create a module that maps Storyblok component technical names to React components. Import it once for its side effects.
+
+```tsx
+import {
+  registerStoryblokComponents,
+  StoryblokComponentList,
+} from "@made-people/grease-storyblok";
+import { Banner } from "@made-people/blueprint-banner";
+import { Grid } from "@made-people/blueprint-grid";
+import { PageHeader } from "@made-people/blueprint-page-header";
+
+registerStoryblokComponents({
+  Banner,
+  Grid,
+  PageHeader,
+  // Containers that should just render their children
+  ContentGroup: StoryblokComponentList,
+  MarketContainer: StoryblokComponentList,
+});
+```
+
+Wrap each component with `React.forwardRef` — `addStoryblokComponents` logs a warning otherwise and preview highlighting will not work.
+
+## Wire up the provider
+
+`StoryblokComponentProvider` holds the transformer stack used to rewrite blok data before render. Mount it once near the root.
+
+```tsx
+import {
+  StoryblokComponentProvider,
+  type StoryblokComponentProviderProps,
+  StoryblokFieldDelimiterTransformer,
+  StoryblokContentReplaceTransformer,
+  StoryblokBlockListTransformer,
+  isStoryblokPreviewRequestQuery,
+} from "@made-people/grease-storyblok";
+import type { SbBlokData } from "@storyblok/js";
+
+const isInsideStoryblokPreview = isStoryblokPreviewRequestQuery(
+  new URLSearchParams(location.search),
+);
+const insideStoryblokPreview = (blok: SbBlokData) =>
+  isInsideStoryblokPreview;
+
+const storyblokComponentProviderProps: StoryblokComponentProviderProps = {
+  transformers: [
+    new StoryblokFieldDelimiterTransformer("_"),
+    new StoryblokContentReplaceTransformer(
+      (value) => (!value.filename ? undefined : { ...value, src: value.filename }),
+      (value) => value.fieldtype === "asset",
+    ),
+    new StoryblokContentReplaceTransformer(
+      (value) => ({ ...value, href: value.url }),
+      (value) =>
+        value?.fieldtype === "multilink" && value?.linktype === "url",
+    ),
+    new StoryblokBlockListTransformer("children", insideStoryblokPreview),
+  ],
+};
+
+<StoryblokComponentProvider {...storyblokComponentProviderProps}>
+  {children}
+</StoryblokComponentProvider>;
+```
+
+The exact stack above is lifted from stronger's bootstrap (`client-frontends/stronger/app/project/bootstrap.tsx`).
+
+## Use it: render a story in a route
+
+Wrap the page in `StoryblokStoryProvider` with the story your BFF returned, then render its blok array with `StoryblokComponentList`. Read the story from `useStoryblokStory` inside the provider so live updates propagate.
+
+```tsx
+import {
+  isStoryblokPreviewRequestQuery,
+  StoryblokComponentList,
+  StoryblokStoryProvider,
+  useStoryblokStory,
+} from "@made-people/grease-storyblok";
+import type { ISbStoryData } from "@storyblok/js";
+
+export const StoryblokPageRoute = ({ page, frontendContext }) => {
+  const location = useLocation();
+  const bffClient = new BffClient({ baseUrl: bffUrl, tenantId });
+
+  const previewStoryResolver = (story: ISbStoryData) =>
+    bffClient.resolveStoryblokStory({
+      story,
+      frontendContext,
+    }) as Promise<ISbStoryData>;
+
+  return (
+    <StoryblokStoryProvider
+      story={page.storyblokData as ISbStoryData}
+      insideStoryblokPreview={isStoryblokPreviewRequestQuery(
+        new URLSearchParams(location.search),
+      )}
+      previewStoryResolver={previewStoryResolver}
+    >
+      <Content />
+    </StoryblokStoryProvider>
+  );
+};
+
+const Content = () => {
+  const { story } = useStoryblokStory();
+  if (!story?.content?.pageContent) return null;
+  return <StoryblokComponentList components={story.content.pageContent} />;
+};
+```
+
+## Live preview
+
+When `insideStoryblokPreview` is truthy **and** `previewStoryResolver` is passed, `StoryblokStoryProvider` auto-mounts `StoryblokPreviewListener`. It calls `loadStoryblokBridge()` from `@storyblok/js` and subscribes to `input`, `change`, and `published` events. `input` events run your resolver and `setStory` with the result; `change` and `published` hard-reload the page.
+
+Inside the visual editor you'll usually also swap anchor tags for a non-navigating span so clicks don't leave the preview frame:
+
+```tsx
+import { StoryblokPreviewLink } from "@made-people/grease-storyblok";
+
+const LinkComponent = isInsideStoryblokPreview ? StoryblokPreviewLink : AppLink;
+```
+
+You can also subscribe to `storyblokEventEmitter` for a `storyUpdated` event if something outside the tree needs to react to a live edit.
+
+## Gotchas
+
+- **No fetcher, no API client.** The package only renders and listens for preview events. Stories must be fetched somewhere else (stronger fetches via `BffClient.resolveStoryblokStory`) and handed in as `ISbStoryData`.
+- **`registerStoryblokComponents` mutates module-level state.** Importing the registration module runs it; there is no provider to scope it. Use `clearStoryblokComponents()` between tests.
+- **Components need `React.forwardRef`.** Without it the warning fires and `storyblokEditable` data attributes do not reach a real DOM node, breaking the clickable outline in the visual editor.
+- **Preview wraps each blok in `<div style={{display:"contents"}}>`.** Components that `cloneElement` on their children (e.g. provider components) will drop those data attributes — use the function form of `insideStoryblokPreview` to return `false` for them (stronger excludes `CentraSearchResultsProvider`, `ElevateSearchResultsProvider`, `MenuItem`).
+- **`isStoryblokPreviewRequestQuery` requires all eight `_storyblok*` params.** Any URL rewrite that strips one silently disables preview.
+- **`change` / `published` trigger `window.location.reload()`.** Unsaved local state in the preview frame is lost when an editor publishes.
+- **`StoryblokFieldDelimiterTransformer` unflattens every component.** Fields named `foo_bar` become `{ foo: { bar } }`. Fields that already start with the delimiter are skipped.
+
+## Related packages
+
+- `@storyblok/js` (peer dep) — source of `ISbStoryData`, `SbBlokData`, `storyblokEditable`, and `loadStoryblokBridge`
+- `@made-people/grease-link` — `StoryblokPreviewLink` implements its `LinkComponentType`
+- `@made-people/grease-event-emitter` — backs `storyblokEventEmitter`
+
+## Troubleshooting
+
+- **Visual editor clicks do nothing:** either your registered component isn't wrapped in `React.forwardRef` so the `data-blok-*` wrapper has no sibling, or `insideStoryblokPreview` is returning `false` for that blok. Verify with `useInsideStoryblokPreview()` in a test render.
+- **Live edits never appear:** you passed `insideStoryblokPreview` but forgot `previewStoryResolver` on `StoryblokStoryProvider`. Both are required to mount the bridge listener.
+- **`Component <Foo> doesn't exist`:** the Storyblok component technical name (from the space) doesn't match any key passed to `registerStoryblokComponents`. Keys are case-sensitive.
