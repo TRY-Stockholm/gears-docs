@@ -1,0 +1,498 @@
+---
+title: Build a Blueprint Component
+description: Step-by-step walkthrough for creating a new Blueprint component in the monorepo — from generator to shipped package
+---
+
+## What you'll learn
+
+How to take a Blueprint component from an empty folder to a published package: the generator, the file shapes it produces, how to wire up `withZod` and `withManagedProps`, and the handful of commands that ship it. We'll build a real example — `blueprint-price-display` — that renders a price, supports a strikethrough original price for discounts, and formats by currency.
+
+This guide assumes you've already read [./blueprint](./blueprint) for the why. Here's the how.
+
+## The shape of a Blueprint package
+
+Every Blueprint package follows the same recipe:
+
+| Part | Purpose |
+|---|---|
+| `package.json` | `@made-people/blueprint-<name>` with `main`, `module`, `exports`, and a dual barrel build |
+| `src/<ComponentName>.tsx` | The React component, wrapped in `withZod` and `withManagedProps` |
+| `src/blueprint.ts` | `createBlueprint({ slots, variants })` — the Tailwind-only styling definition |
+| `vite.config.ts` | Dual entry build (`index`, `index-blueprint`) via Vite + `vite-plugin-dts` |
+| `config/rush-project.json` | Tells Rush `dist/` is the build output |
+| `eslint.config.mjs`, `tsconfig.json` | Standard lint and TS config |
+
+Two things to remember:
+1. **Two entry points.** `index` ships the React component. `index-blueprint` ships only the `blueprint.ts` styling object so clients can import styling without pulling React.
+2. **`withZod` wraps `withManagedProps`.** The outer wrapper is always `withManagedProps` so tenants can override — validation runs inside.
+
+## 1. Pick a name and scope
+
+Blueprint packages live under `src/frontend/blueprint/<kebab-name>/` and publish as `@made-people/blueprint-<kebab-name>`. The folder name is kebab-case without the `blueprint-` prefix (the prefix is applied to the npm name, not the folder).
+
+For our example:
+
+- Folder: `src/frontend/blueprint/price-display/`
+- Package name: `@made-people/blueprint-price-display`
+
+**When to split vs extend:**
+- **Extend** an existing package when the new behavior is a variant of the same visual primitive (a new `size` on `Badge`, a new template on `ProductCard`).
+- **Split** when the component has its own props, its own styling concerns, and would be useful on its own. Blueprint leans toward many small focused packages — `blueprint-heading` imports `blueprint-badge` rather than bundling both.
+
+If you're unsure, split. Small packages are easier to publish and easier to delete.
+
+## 2. Run the generator
+
+The generator lives at `development-utilities/cool-rush-tools/src/create-ui-component.ts` and is wired into Rush as:
+
+```bash
+rush create-ui-component
+```
+
+It prompts for a name, copies the boilerplate from `development-utilities/boilerplates/ui-components/standard-component/`, renames `StandardComponent` → your component, and registers the project in `rush.json`.
+
+```bash
+$ rush create-ui-component
+Enter the name of the new component: price-display
+price-display component created successfully!
+Replacing standard-component with component name...
+Replaced "standard-component" with "price-display" in all files!
+Copied storybook standard-component for price-display!
+Replaced "StandardComponent" with "price-display" in storybook file!
+price-display added to rush.json!
+```
+
+### Gaps the generator leaves
+
+The generator targets `src/frontend/ui-components/<Name>/` and produces a minimal `tailwind-variants` scaffold — which is the older pattern. Blueprint packages use a richer shape. After running the generator, **move the folder** and fix these files:
+
+```bash
+mv src/frontend/ui-components/PriceDisplay src/frontend/blueprint/price-display
+```
+
+Then update `rush.json` so the new entry matches Blueprint conventions:
+
+```json
+{
+  "packageName": "@made-people/blueprint-price-display",
+  "projectFolder": "src/frontend/blueprint/price-display",
+  "shouldPublish": true
+}
+```
+
+If you'd rather skip the generator and copy from a nearby small Blueprint package (e.g. `src/frontend/blueprint/badge/`), that's also fine — most engineers on this codebase do. Just remember to bump `rush.json`.
+
+Run `rush update` so the new package gets linked:
+
+```bash
+rush update
+```
+
+## 3. Write the minimal component
+
+Start with the dumbest possible version — a plain React function that renders a price. We'll wire up validation and managed props in later steps.
+
+Create `src/frontend/blueprint/price-display/src/PriceDisplay.tsx`:
+
+```tsx
+import React from "react";
+
+export interface PriceDisplayProps {
+  amount: number;
+  currency: string;
+  originalAmount?: number;
+}
+
+function formatPrice(amount: number, currency: string): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+  }).format(amount);
+}
+
+export const PriceDisplay = ({
+  amount,
+  currency,
+  originalAmount,
+}: PriceDisplayProps) => {
+  const isDiscounted =
+    originalAmount !== undefined && originalAmount > amount;
+
+  return (
+    <div>
+      <span>{formatPrice(amount, currency)}</span>
+      {isDiscounted && <s>{formatPrice(originalAmount, currency)}</s>}
+    </div>
+  );
+};
+```
+
+No `any`, no comments explaining the obvious — this is the bar set in `CLAUDE.md` and it applies to every package.
+
+## 4. Add Tailwind styling from the theme
+
+Blueprint styles live in `blueprint.ts`, not inline in the component. Create `src/blueprint.ts`:
+
+```ts
+import { createBlueprint } from "@made-people/blueprint";
+
+export const priceDisplayBlueprint = createBlueprint({
+  slots: {
+    wrapper: "flex items-baseline gap-2",
+    current: "text-body-md font-medium font-primary text-text-body",
+    original: "text-body-sm text-text-less-emphasis-2 line-through",
+    discounted: "text-sale-price",
+  },
+  variants: {
+    size: {
+      sm: {
+        current: "text-body-sm",
+        original: "text-body-sm",
+      },
+      md: {
+        current: "text-body-md",
+        original: "text-body-sm",
+      },
+      lg: {
+        current: "text-body-lg font-medium",
+        original: "text-body-md",
+      },
+    },
+  },
+});
+```
+
+Every color, spacing, and font value comes from the project's extended Tailwind theme in `development-utilities/storybook-react/client/tailwind-theme.ts`. Tokens like `text-text-body`, `text-sale-price`, `text-less-emphasis-2`, `font-primary`, and `text-body-md` are all defined there.
+
+**Never hard-code hex values or raw pixel values.** `bg-[#f4f4f5]` or `text-[14px]` is a code-review red flag. If a token doesn't exist for what you need, add it to the theme — don't work around it.
+
+Now wire the slots into the component:
+
+```tsx
+import React from "react";
+import clsx from "clsx";
+import { priceDisplayBlueprint } from "./blueprint";
+
+export const PriceDisplay = ({
+  amount,
+  currency,
+  originalAmount,
+  variants,
+}: PriceDisplayProps) => {
+  const slots = priceDisplayBlueprint.styles(variants);
+  const isDiscounted =
+    originalAmount !== undefined && originalAmount > amount;
+
+  return (
+    <div className={slots.wrapper}>
+      <span className={clsx(slots.current, isDiscounted && slots.discounted)}>
+        {formatPrice(amount, currency)}
+      </span>
+      {isDiscounted && (
+        <s className={slots.original}>
+          {formatPrice(originalAmount, currency)}
+        </s>
+      )}
+    </div>
+  );
+};
+```
+
+## 5. Define the prop schema with Zod
+
+Blueprint components take props from CMS payloads, API responses, and tenant overrides. A Zod schema is how we catch bad data early and generate types in one place.
+
+```ts
+import { z } from "zod";
+import { VariantProps } from "@made-people/blueprint";
+import { priceDisplayBlueprint } from "./blueprint";
+
+export const priceDisplaySchema = z.object({
+  amount: z.number(),
+  currency: z.string(),
+  originalAmount: z.number().optional(),
+  className: z.string().optional(),
+  variants: z
+    .custom<VariantProps<typeof priceDisplayBlueprint>>()
+    .optional(),
+});
+
+export type PriceDisplayProps = z.infer<typeof priceDisplaySchema>;
+```
+
+Three conventions worth noting:
+
+- Derive the type from the schema with `z.infer` — don't declare the interface separately.
+- The `variants` prop uses `z.custom<VariantProps<...>>()` because Zod can't validate a tailwind-variants shape directly; we trust TypeScript for that part.
+- Export the schema as well as the type. Other Blueprint packages compose schemas (see `blueprint-heading` consuming `badgeSchema`).
+
+## 6. Wrap in `withZod`
+
+`withZod` catches prop mismatches and renders a clear error in dev instead of a silent crash. See [./with-zod](./with-zod) for the full story.
+
+```tsx
+import { withZod } from "@made-people/react-prop-guard";
+
+const PriceDisplayInner = withZod(
+  priceDisplaySchema,
+  ({ amount, currency, originalAmount, variants, className }) => {
+    const slots = priceDisplayBlueprint.styles(variants);
+    const isDiscounted =
+      originalAmount !== undefined && originalAmount > amount;
+
+    return (
+      <div className={clsx(slots.wrapper, className)}>
+        <span
+          className={clsx(slots.current, isDiscounted && slots.discounted)}
+        >
+          {formatPrice(amount, currency)}
+        </span>
+        {isDiscounted && (
+          <s className={slots.original}>
+            {formatPrice(originalAmount, currency)}
+          </s>
+        )}
+      </div>
+    );
+  },
+);
+```
+
+When the component needs defaults, pass the object form:
+
+```tsx
+withZod(
+  {
+    schema: priceDisplaySchema,
+    defaultProps: { currency: "EUR" },
+  },
+  (props) => { /* ... */ },
+)
+```
+
+## 7. Wrap in `withManagedProps`
+
+`withManagedProps` registers the component under a string name so tenants can override its defaults from their bootstrap. See [./with-managed-props](./with-managed-props) for the override API.
+
+```tsx
+import { withManagedProps } from "@made-people/managed-props";
+
+export const PriceDisplay = withManagedProps("PriceDisplay", PriceDisplayInner);
+```
+
+The name is global — pick something unique and unambiguous. Match the component class name (PascalCase). A client using this component can then set per-tenant defaults:
+
+```tsx
+<ManagedPropsProvider
+  overrides={{
+    PriceDisplay: { variants: { size: "lg" } },
+  }}
+>
+  {children}
+</ManagedPropsProvider>
+```
+
+Putting it all together, `src/PriceDisplay.tsx`:
+
+```tsx
+import React from "react";
+import clsx from "clsx";
+import { z } from "zod";
+import { VariantProps } from "@made-people/blueprint";
+import { withZod } from "@made-people/react-prop-guard";
+import { withManagedProps } from "@made-people/managed-props";
+import { priceDisplayBlueprint } from "./blueprint";
+
+export const priceDisplaySchema = z.object({
+  amount: z.number(),
+  currency: z.string(),
+  originalAmount: z.number().optional(),
+  className: z.string().optional(),
+  variants: z
+    .custom<VariantProps<typeof priceDisplayBlueprint>>()
+    .optional(),
+});
+
+export type PriceDisplayProps = z.infer<typeof priceDisplaySchema>;
+
+function formatPrice(amount: number, currency: string): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+  }).format(amount);
+}
+
+export const PriceDisplay = withManagedProps(
+  "PriceDisplay",
+  withZod(
+    priceDisplaySchema,
+    ({ amount, currency, originalAmount, variants, className }) => {
+      const slots = priceDisplayBlueprint.styles(variants);
+      const isDiscounted =
+        originalAmount !== undefined && originalAmount > amount;
+
+      return (
+        <div className={clsx(slots.wrapper, className)}>
+          <span
+            className={clsx(
+              slots.current,
+              isDiscounted && slots.discounted,
+            )}
+          >
+            {formatPrice(amount, currency)}
+          </span>
+          {isDiscounted && (
+            <s className={slots.original}>
+              {formatPrice(originalAmount, currency)}
+            </s>
+          )}
+        </div>
+      );
+    },
+  ),
+);
+```
+
+## 8. Write the Storybook story
+
+Stories show the component's states at a glance. Put the file next to the component as `src/PriceDisplay.stories.tsx` — the barrelsby step in the build excludes `.stories.` from the published bundle.
+
+```tsx
+import { Meta, StoryObj } from "@storybook/react";
+import React from "react";
+import { PriceDisplay } from "./PriceDisplay";
+
+const meta: Meta<typeof PriceDisplay> = {
+  title: "Blueprint/PriceDisplay",
+  component: PriceDisplay,
+  argTypes: {},
+};
+
+export default meta;
+
+type Story = StoryObj<typeof PriceDisplay>;
+
+export const Default: Story = {
+  args: {
+    amount: 499,
+    currency: "EUR",
+  },
+};
+
+export const Discounted: Story = {
+  args: {
+    amount: 349,
+    originalAmount: 499,
+    currency: "EUR",
+  },
+};
+
+export const ZeroPrice: Story = {
+  args: {
+    amount: 0,
+    currency: "EUR",
+  },
+};
+
+export const Large: Story = {
+  args: {
+    amount: 1299,
+    currency: "EUR",
+    variants: { size: "lg" },
+  },
+};
+```
+
+Naming conventions:
+
+- `title: "Blueprint/<ComponentName>"` — groups all Blueprint components in one sidebar section.
+- Each exported story is a state: `Default`, `Discounted`, `ZeroPrice`. No narrative prose in names.
+- Use `args`, not `Template.bind`. The old template pattern still appears in older files; prefer the object form.
+
+An `.mdx` file alongside (e.g. `PriceDisplay.mdx`) is optional but nice to have for docs pages. See `src/frontend/blueprint/heading/src/Heading.mdx` for the shape.
+
+## 9. Build and test
+
+Build only the package you're working on — do **not** use `rush build --to`:
+
+```bash
+cd src/frontend/blueprint/price-display
+npm run build
+```
+
+The build runs barrelsby (twice — once for `index-blueprint`, once for `index`), then `tsc --noEmit` for type-checking, then Vite for the actual bundle. Output lands in `dist/`.
+
+If you added tests:
+
+```bash
+rush test --to @made-people/blueprint-price-display
+```
+
+Launch Storybook to verify visually:
+
+```bash
+rush storybook
+```
+
+Navigate to **Blueprint / PriceDisplay** in the sidebar.
+
+## 10. Ship it
+
+Create a changelog entry — required for every published package change:
+
+```bash
+rush change
+```
+
+Answer the prompts. For a new package, a single `patch` entry is fine:
+
+```json
+{
+  "changes": [
+    {
+      "packageName": "@made-people/blueprint-price-display",
+      "comment": "Add package",
+      "type": "patch"
+    }
+  ],
+  "packageName": "@made-people/blueprint-price-display"
+}
+```
+
+Version policy: `patch` for additions and fixes, `minor` for new public API on an existing package, `major` for breaking changes. New packages start at `0.0.0` and take `patch` bumps until someone decides they're stable.
+
+Commit the generated file in `common/changes/@made-people/blueprint-price-display/` along with your code, push, and open the MR. CI will run build, tests, prettier, and eslint across affected packages.
+
+## Gotchas
+
+- **No `any` type.** `CLAUDE.md` is strict: fix the types, don't bypass them. If you need to interop with something loose, narrow via `unknown` + a type guard.
+- **No hard-coded Tailwind values.** `bg-[#f4f4f5]` and `text-[14px]` bypass the theme. Use `tailwind-theme.ts` tokens — if none fit, add one.
+- **No comments explaining what the code does.** Only add comments the user explicitly asks for. Blueprint PRs get rejected on stray "// loop over items" noise.
+- **Use relative imports inside client-frontends,** not the `~` alias. This rule affects how downstream clients consume your component — don't ship examples that violate it.
+- **Don't skip `rush change`.** CI will block the MR. If you truly didn't change published code, use `--no-change` explicitly; default assumption is every PR needs one.
+- **Barrelsby regenerates `index.ts` and `index-blueprint.ts`.** Don't hand-edit those files — the next build will wipe them.
+- **`withManagedProps` must be the outermost wrapper.** If you flip the order, tenant overrides silently stop applying.
+
+## Troubleshooting
+
+**`rush create-ui-component` hangs or errors.** The script uses interactive `readline.question` — make sure you're running it from a real TTY, not a CI or subprocess. If it fails mid-way, delete the partially-created folder and retry, or skip the generator and copy from `src/frontend/blueprint/badge/`.
+
+**`npm run build` fails with "Cannot find module './blueprint'".** Barrelsby runs before TSC. If the `src/blueprint.ts` file wasn't named exactly that, the `barrelsby:blueprint` script picks up nothing. Confirm the filename and rerun.
+
+**Storybook doesn't show the new story.** Storybook picks up stories from packages listed as dependencies in `development-utilities/storybook-react/package.json`. Add `@made-people/blueprint-price-display` there, then `rush update`, then restart `rush storybook`.
+
+**`withZod` throws "Invalid props" in dev.** Your CMS or parent is sending something the schema rejects. Open the browser console — the error includes the Zod path (e.g. `amount: Expected number, received string`) so you can fix the caller or relax the schema.
+
+**`withManagedProps` name clash warning.** Two packages registered the same string name. Rename one. The name is a module-level singleton — uniqueness isn't enforced at type level.
+
+**Types aren't updated in a consumer.** The consumer is reading the old `dist/index.d.ts`. Run `npm run build` in the Blueprint package, then restart the consumer's TS server.
+
+## Related packages
+
+- `@made-people/blueprint` — `createBlueprint`, `VariantProps` (the styling primitive)
+- `@made-people/react-prop-guard` — `withZod`
+- `@made-people/managed-props` — `withManagedProps` and the provider
+- `@made-people/grease-translations` — `useTranslate` for user-facing strings
+- `@made-people/blueprint-tailwind-config-preset` — shared Tailwind tokens
+
+**Next:** [Blueprint overview](./blueprint) · [withZod](./with-zod) · [withManagedProps](./with-managed-props)

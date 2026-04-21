@@ -1,0 +1,610 @@
+---
+title: Build a Minimal Gears Client
+description: Bootstrap a Remix app from scratch that renders a Centra PDP and lets the user add a variant to the cart — no checkout, no CMS, nothing else
+---
+
+## What you'll learn
+
+How to stand up a Remix app on top of Gears in about half an hour. By the end you have a route that fetches a Centra product page from the BFF, renders name, price, and a size picker, and pushes line items into a working cart drawer. Checkout, account, and CMS are deliberately out of scope — they have their own guides.
+
+## 1. Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Node.js 20 or later | Anything 18+ will probably work; 20 is what the clients ship on |
+| pnpm 9+ | Any modern package manager works, we use pnpm |
+| A Centra tenant reachable through a Gears BFF | Either your own (`TENANT_ID`) or the shared dev credentials from your TRY contact |
+| A known-good product slug | Something like `/en/t-shirts/black-tee` — whatever the BFF returns a `centraProductPage` for |
+
+You'll need these env vars for the rest of the tutorial. Put them in `.env` at the repo root once you've scaffolded:
+
+```bash
+TENANT_ID=your-tenant-id
+GEARS_ENVIRONMENT=test           # dev | test | stage | prod
+GEARS_RUN_MODE=local             # local for dev, cluster otherwise
+GEARS_CLUSTER_MODE=saas
+GEARS_DOMAIN=gears.madepeople.dev
+```
+
+`gearsRootLoader` reads these from `process.env` on the server and hands them to the client via the root loader. If any are missing it will throw on the first request.
+
+## 2. Scaffold the Remix app
+
+```bash
+pnpm create remix@latest gears-mini
+cd gears-mini
+```
+
+Pick **"Just the basics"** and **Vite** when prompted. You can remove the example `app/routes/_index.tsx` — the Gears wildcard route will own everything.
+
+Smoke-test it:
+
+```bash
+pnpm dev
+```
+
+You should see the Remix welcome screen at `http://localhost:3000`. Stop it — we'll bring it back in step 10.
+
+## 3. Install Gears packages
+
+```bash
+pnpm add @made-people/gears-configuration \
+         @made-people/gears-remix \
+         @made-people/gears-bff-client \
+         @made-people/grease-remix \
+         @made-people/grease-cart \
+         @made-people/grease-centra \
+         @made-people/grease-product \
+         @made-people/centra-checkout-api \
+         @made-people/nestjs-bff-service \
+         zod
+```
+
+What each one gives you:
+
+| Package | Role |
+|---|---|
+| `gears-configuration` | `GearsConfigurationProvider` + the `useGearsServiceUrl` / `useGearsConfigurationVariable` hooks |
+| `gears-remix` | `gearsRootLoader`, `gearsLoader`, `gearsMeta`, `gearsAction` |
+| `gears-bff-client` | `BffClient` — the HTTP client that talks to the BFF |
+| `grease-remix` | Remix-specific helpers such as `useRouteChanged` |
+| `grease-cart` | `CartProvider`, `useCartState`, `useCartMethod`, `useUpdateCart` |
+| `grease-centra` | `CentraProvider`, the Centra cart driver, product mappers |
+| `grease-product` | `ProductProvider` + the product-context hooks |
+| `centra-checkout-api` | `createCentraCheckoutAPIClient`, `CentraLocalStorageTokenHandler` |
+| `nestjs-bff-service` | Type definitions — `FrontendContextV1`, `CentraProductPage`, etc. |
+| `zod` | Peer dep; schemas in grease validate at the boundary |
+
+## 4. Env vars and the root loader
+
+Open `app/root.tsx` and replace its loader with `gearsRootLoader`. This is where per-request config lands.
+
+```tsx
+// app/root.tsx
+import {
+  Links,
+  Meta,
+  Outlet,
+  Scripts,
+  ScrollRestoration,
+  useRouteLoaderData,
+} from "@remix-run/react";
+import type { DataFunctionArgs } from "@remix-run/node";
+import { json } from "@remix-run/node";
+import { gearsRootLoader } from "@made-people/gears-remix";
+import { Bootstrap } from "./project/bootstrap";
+
+export const loader = async (context: DataFunctionArgs) => {
+  const gearsData = await gearsRootLoader(context);
+  if (!gearsData) {
+    return null;
+  }
+  return json(gearsData);
+};
+
+export const shouldRevalidate = () => false;
+
+export function Layout({ children }: { children: React.ReactNode }) {
+  return (
+    <Bootstrap>
+      <html lang="en">
+        <head>
+          <meta charSet="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <Meta />
+          <Links />
+        </head>
+        <body>
+          {children}
+          <ScrollRestoration />
+          <Scripts />
+        </body>
+      </html>
+    </Bootstrap>
+  );
+}
+
+export default function App() {
+  return <Outlet />;
+}
+```
+
+`gearsRootLoader` returns `null` for non-page URLs (favicon, assets). Our layout returns `null` in that case; Remix renders nothing.
+
+> **Don't revalidate the root.** `shouldRevalidate = () => false` prevents the root loader from re-running on every navigation, which would otherwise nuke the cart state on each client-side transition.
+
+## 5. Configuration provider
+
+Anything that reads a service URL or the tenant needs `GearsConfigurationProvider` above it. Create `app/project/bootstrap.tsx` — we'll flesh it out in the next step, but for now the outer shell looks like this:
+
+```tsx
+// app/project/bootstrap.tsx (skeleton — don't save yet)
+import { PropsWithChildren } from "react";
+import { useRouteLoaderData } from "@remix-run/react";
+import { GearsConfigurationProvider } from "@made-people/gears-configuration";
+import type { loader as rootLoader } from "../root";
+
+export const Bootstrap = ({ children }: PropsWithChildren) => {
+  const rootLoaderData = useRouteLoaderData<typeof rootLoader>("root");
+  if (!rootLoaderData?.gearsConfiguration) {
+    return null;
+  }
+  return (
+    <GearsConfigurationProvider
+      gearsConfiguration={rootLoaderData.gearsConfiguration}
+    >
+      {children}
+    </GearsConfigurationProvider>
+  );
+};
+```
+
+Two hooks light up once this is in place:
+
+```tsx
+const bffUrl = useGearsServiceUrl("bff");
+const tenantId = useGearsConfigurationVariable("tenantId");
+```
+
+Valid service keys: `"bff" | "engage" | "elevate" | "algolia" | "yotpo"`. For this tutorial only `"bff"` matters.
+
+## 6. Bootstrap stack — the minimum viable tree
+
+Now the full bootstrap. Three providers, in this order, wrapped by `GearsConfigurationProvider`:
+
+| Provider | Why it's here |
+|---|---|
+| `GearsConfigurationProvider` | Supplies the BFF URL and tenant id to every hook below |
+| Centra checkout client + token handler | Instantiate **once** — the token is the cart id; re-instantiating blanks the cart |
+| `CentraProvider` | Runs the initial `fetchSelection` and internally mounts `CentraGreaseCartProvider` which mounts `CartProvider` — you do not mount `CartProvider` yourself |
+
+Replace the skeleton from step 5 with the real file:
+
+```tsx
+// app/project/bootstrap.tsx
+import { PropsWithChildren, useMemo } from "react";
+import { useRouteLoaderData } from "@remix-run/react";
+import {
+  GearsConfigurationProvider,
+  useGearsConfigurationVariable,
+  useGearsServiceUrl,
+} from "@made-people/gears-configuration";
+import { BffClient } from "@made-people/gears-bff-client";
+import {
+  createCentraCheckoutAPIClient,
+  CentraLocalStorageTokenHandler,
+} from "@made-people/centra-checkout-api";
+import { CentraProvider } from "@made-people/grease-centra";
+import type { FrontendContextV1 } from "@made-people/nestjs-bff-service";
+import { useRouteLoaderData as useRouteLoaderDataTyped } from "@remix-run/react";
+import type { loader as rootLoader } from "../root";
+import type { gearsLoader } from "@made-people/gears-remix";
+
+const ConfiguredBootstrap = ({ children }: PropsWithChildren) => {
+  const bffUrl = useGearsServiceUrl("bff");
+  const tenantId = useGearsConfigurationVariable("tenantId");
+
+  const rootLoaderData = useRouteLoaderData<typeof rootLoader>("root");
+  const pageLoaderData = useRouteLoaderDataTyped<typeof gearsLoader>(
+    "project-router-wildcard",
+  );
+
+  const settings = rootLoaderData?.settingsAndContentResponse;
+  const frontendContext = pageLoaderData?.pageResponse.frontendContext as
+    | FrontendContextV1
+    | undefined;
+
+  const centraTokenHandler = useMemo(
+    () => new CentraLocalStorageTokenHandler(30 * 24 * 60 * 60 * 1000),
+    [],
+  );
+
+  const centraCheckoutAPIClient = useMemo(() => {
+    if (!settings) return undefined;
+    return createCentraCheckoutAPIClient({
+      baseUrl: settings.centraCheckoutApiBaseUrl,
+      centraTokenHandler,
+    });
+  }, [settings, centraTokenHandler]);
+
+  // bffClient is available for code that needs to call the BFF directly —
+  // the checkout API client is what CentraProvider uses.
+  const bffClient = useMemo(
+    () => new BffClient({ baseUrl: bffUrl, tenantId }),
+    [bffUrl, tenantId],
+  );
+
+  if (!settings || !frontendContext || !centraCheckoutAPIClient) {
+    return <>{children}</>;
+  }
+
+  return (
+    <CentraProvider
+      checkoutAPIClient={centraCheckoutAPIClient}
+      initializationType="onLoad"
+      mapperOptions={{
+        options: {
+          context: {
+            currencyCode: frontendContext.currency.currency!,
+            countryCode: frontendContext.country!,
+          },
+        },
+      }}
+      queryContext={{
+        market: frontendContext.market,
+        pricelist: frontendContext.pricelist,
+        language: frontendContext.language,
+        site: {
+          baseUrl: frontendContext.baseUrl,
+          slug: frontendContext.siteSlug,
+        },
+      }}
+    >
+      {children}
+    </CentraProvider>
+  );
+};
+
+export const Bootstrap = ({ children }: PropsWithChildren) => {
+  const rootLoaderData = useRouteLoaderData<typeof rootLoader>("root");
+  if (!rootLoaderData?.gearsConfiguration) {
+    return null;
+  }
+  return (
+    <GearsConfigurationProvider
+      gearsConfiguration={rootLoaderData.gearsConfiguration}
+    >
+      <ConfiguredBootstrap>{children}</ConfiguredBootstrap>
+    </GearsConfigurationProvider>
+  );
+};
+```
+
+Two things worth calling out:
+
+- **`useMemo` on the token handler and the client.** The token handler persists the Centra selection id to localStorage — constructing it per render rotates the token and blanks the cart.
+- **`mapperOptions` has no custom mappers.** Real clients pass `strongerCentraMappers` or similar to customise product shape. The default mapper is fine for this tutorial.
+
+> If you see `"useGearsConfiguration must be used within a GearsConfigurationProvider"` at runtime, you've mounted a hook above `GearsConfigurationProvider`. Move it inside.
+
+## 7. The wildcard route
+
+Every URL goes through one router component. In Vite-Remix you configure it in `vite.config.ts`:
+
+```ts
+// vite.config.ts
+import { vitePlugin as remix } from "@remix-run/dev";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [
+    remix({
+      routes(defineRoutes) {
+        return defineRoutes((route) => {
+          route("/", "project/router.tsx", { id: "project-router-slash" });
+          route("*", "project/router.tsx", { id: "project-router-wildcard" });
+        });
+      },
+    }),
+  ],
+});
+```
+
+Both routes point at the same file. The `id: "project-router-wildcard"` is load-bearing — `useRouteLoaderData(...)` in child components looks it up by that id.
+
+Now the router itself:
+
+```tsx
+// app/project/router.tsx
+import { useRouteLoaderData } from "@remix-run/react";
+import { gearsLoader, gearsMeta, gearsAction } from "@made-people/gears-remix";
+import type { MetaFunction } from "@remix-run/react";
+import type {
+  FindPageResponseV1,
+  CentraProductPage,
+} from "@made-people/nestjs-bff-service";
+import { CentraProductPageRoute } from "../gears/routes/centra-product-page-route";
+
+export const loader = gearsLoader;
+export const action = gearsAction;
+
+// @ts-expect-error gearsMeta's types are looser than Remix's newer MetaFunction
+export const meta: MetaFunction = (ctx) => gearsMeta(ctx);
+
+export default function Router() {
+  const data = useRouteLoaderData<typeof gearsLoader>(
+    "project-router-wildcard",
+  );
+  if (!data) return null;
+
+  const { page, frontendContext } = data.pageResponse as FindPageResponseV1;
+
+  switch (page.pageType) {
+    case "centraProductPage":
+      return (
+        <CentraProductPageRoute
+          page={page as CentraProductPage}
+          frontendContext={frontendContext}
+        />
+      );
+    default:
+      return (
+        <main style={{ padding: 32 }}>
+          <h1>Unhandled page type</h1>
+          <pre>{page.pageType}</pre>
+        </main>
+      );
+  }
+}
+```
+
+`gearsLoader` does the heavy lifting: it calls `fetchPage` on the BFF, handles redirects and raw responses, and returns `{ pageResponse }` shaped like `FindPageResponseV1`. You only have to dispatch on `page.pageType`.
+
+## 8. The PDP route
+
+This is the smallest useful PDP — product name, price, size picker, add-to-cart. It uses `grease-product`'s `ProductProvider` so the cart hooks can find the product in context.
+
+```tsx
+// app/gears/routes/centra-product-page-route.tsx
+import type {
+  CentraProductPage,
+  FrontendContextV1,
+  FrontendProduct,
+} from "@made-people/nestjs-bff-service";
+import {
+  makeCentraCheckoutApiProductToGreaseProductMapper,
+  type Product,
+} from "@made-people/grease-centra";
+import { ProductProvider } from "@made-people/grease-product";
+import { AddToCartButton } from "../../project/components/add-to-cart-button";
+import { SizePicker } from "../../project/components/size-picker";
+import { CartDrawer } from "../../project/components/cart-drawer";
+
+const toGreaseProduct = (
+  productData: FrontendProduct,
+  frontendContext: FrontendContextV1,
+): Product => {
+  const mapper = makeCentraCheckoutApiProductToGreaseProductMapper({
+    context: {
+      currencyCode: frontendContext.currency.currency!,
+      countryCode: frontendContext.country!,
+    },
+  });
+  // FrontendProduct from the BFF is already shaped like the checkout-api product.
+  // Real clients keep a dedicated `frontendProductToCheckoutApiProduct` mapper —
+  // for this tutorial a cast is enough.
+  return mapper(productData as never);
+};
+
+export const CentraProductPageRoute = ({
+  page,
+  frontendContext,
+}: {
+  page: CentraProductPage;
+  frontendContext: FrontendContextV1;
+}) => {
+  const product = toGreaseProduct(page.productData, frontendContext);
+
+  return (
+    <ProductProvider product={product} context={{ type: "pdp" }}>
+      <main style={{ padding: 32, maxWidth: 480, margin: "0 auto" }}>
+        <h1>{product.content.name}</h1>
+        <p>
+          {product.purchase.priceInfo.price.formatted}
+        </p>
+        <SizePicker />
+        <AddToCartButton />
+      </main>
+      <CartDrawer />
+    </ProductProvider>
+  );
+};
+```
+
+The size picker reads `useProductOptions` — `ProductProvider` builds that context from the variants on the product.
+
+```tsx
+// app/project/components/size-picker.tsx
+import { useProductOptions } from "@made-people/grease-product";
+
+export const SizePicker = () => {
+  const { optionGroups, selectedOptions, selectOption } = useProductOptions();
+  const sizes = optionGroups[0];
+  if (!sizes) return null;
+
+  return (
+    <div style={{ display: "flex", gap: 8, margin: "16px 0" }}>
+      {sizes.options.map((option) => {
+        const isSelected =
+          selectedOptions[sizes.dimensionKey]?.dimensionValue ===
+          option.dimensionValue;
+        return (
+          <button
+            key={option.dimensionValue}
+            onClick={() => selectOption(sizes.dimensionKey, option)}
+            disabled={!option.inventory.inStock}
+            style={{
+              padding: "8px 12px",
+              border: isSelected ? "2px solid black" : "1px solid #ccc",
+              opacity: option.inventory.inStock ? 1 : 0.4,
+            }}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+};
+```
+
+The add-to-cart button uses `useUpdateCart`, which internally reads the selected variant's `availableItemId` from `ProductProvider`. If nothing's selected the button is disabled.
+
+```tsx
+// app/project/components/add-to-cart-button.tsx
+import { useUpdateCart } from "@made-people/grease-cart";
+
+export const AddToCartButton = () => {
+  const { addToCartMethod, isAvailable, quantityInCart } = useUpdateCart();
+
+  return (
+    <button
+      onClick={() => addToCartMethod.execute(1)}
+      disabled={!isAvailable || addToCartMethod.loadingState === "loading"}
+      style={{
+        padding: "12px 24px",
+        background: "black",
+        color: "white",
+        width: "100%",
+      }}
+    >
+      {addToCartMethod.loadingState === "loading" ? "Adding…" : "Add to cart"}
+      {quantityInCart > 0 ? ` (in cart: ${quantityInCart})` : ""}
+    </button>
+  );
+};
+```
+
+## 9. A tiny CartDrawer
+
+Reads state with `useCartState`, mutates with `useCartMethod`. No styling framework — just enough to prove it works.
+
+```tsx
+// app/project/components/cart-drawer.tsx
+import { useCartState, useCartMethod } from "@made-people/grease-cart";
+
+export const CartDrawer = () => {
+  const { cart } = useCartState();
+  const updateQuantity = useCartMethod("updateQuantity");
+  const removeFromCart = useCartMethod("removeFromCart");
+
+  if (!cart || cart.items.length === 0) {
+    return (
+      <aside style={asideStyle}>
+        <h2>Cart</h2>
+        <p>Empty.</p>
+      </aside>
+    );
+  }
+
+  return (
+    <aside style={asideStyle}>
+      <h2>Cart ({cart.items.length})</h2>
+      {cart.items.map((item) => (
+        <div key={item.lineId} style={{ padding: 8, borderTop: "1px solid #eee" }}>
+          <div>{item.type === "product" ? item.product.content.name : item.product.name}</div>
+          <div>Qty: {item.quantity}</div>
+          <button
+            onClick={() =>
+              updateQuantity.execute({
+                lineId: item.lineId,
+                quantity: item.quantity + 1,
+              })
+            }
+          >
+            +
+          </button>
+          <button
+            onClick={() =>
+              removeFromCart.execute({ lineId: item.lineId, removedItem: item })
+            }
+          >
+            remove
+          </button>
+        </div>
+      ))}
+      {cart.totals && <div>Total: {cart.totals.grandTotal.formatted}</div>}
+    </aside>
+  );
+};
+
+const asideStyle: React.CSSProperties = {
+  position: "fixed",
+  right: 16,
+  top: 16,
+  width: 280,
+  padding: 16,
+  background: "white",
+  border: "1px solid #ccc",
+};
+```
+
+`removeFromCart` requires `removedItem: LineItem` alongside `lineId`. Pass the whole line object — don't rebuild it.
+
+## 10. Run it
+
+```bash
+pnpm dev
+```
+
+Navigate to a product slug the BFF knows about — e.g. `http://localhost:3000/en/t-shirts/black-tee`. You should see:
+
+- Product name and price rendered from `FrontendProduct`
+- A size picker with one button per variant; out-of-stock options are dimmed
+- An add-to-cart button that activates once a size is picked
+- The floating drawer in the top-right updating every click
+
+Open dev tools → Application → Local Storage. You should see a Centra token — that's the cart id persisted via `CentraLocalStorageTokenHandler`. Reload the page; the cart survives.
+
+## Gotchas
+
+- **Missing `GearsConfigurationProvider`.** `useGearsServiceUrl` throws `"useGearsConfiguration must be used within a GearsConfigurationProvider"`. Check that `Bootstrap` is rendered above your routes.
+- **`CartProvider` mounted manually under `CentraProvider`.** Don't. `CentraProvider` nests `CentraGreaseCartProvider`, which already mounts `CartProvider`. Double-mounting gives you two cart contexts pointing at different drivers.
+- **Token handler instantiated inside a component body without `useMemo`.** Every render makes a new handler, which rotates the token and drops the cart on each re-render.
+- **`shouldRevalidate` not set on the root.** Every client-side navigation re-runs `gearsRootLoader`, which reinitializes config and can break the in-memory cart.
+- **`useProductOptions()` outside `ProductProvider`.** Throws `"useProductVariant must be used within a ProductVariantProvider"`. Mount the provider at the top of the PDP route.
+- **Wildcard route id mismatch.** `useRouteLoaderData("project-router-wildcard")` returns `undefined` if the route id in `vite.config.ts` doesn't match. Spelling matters.
+- **`null` from `gearsRootLoader` on `/`.** The loader returns `null` when there's no URL path. That's expected — your root layout should handle `null` gracefully (render nothing, or a landing page).
+
+## Troubleshooting
+
+**Blank page, no errors** — the BFF returned `null` for the URL. Confirm your `TENANT_ID` is set on the server and that the slug exists for that tenant. Check the Network tab for the BFF call and its status code.
+
+**`useCartState must be used inside a <CartProvider />`** — a cart hook is mounted outside `CentraProvider`. Move `CartDrawer` inside `ProductProvider` (which is inside `CentraProvider` via `Bootstrap`).
+
+**"undefined is not a function" on `option.inventory.inStock`** — the product mapper isn't producing variants. The default mapper relies on the product having `items` with `dimensions`. Inspect `page.productData` in the loader response and make sure you're on a product with sizes.
+
+**Cart adds succeed but drawer stays empty** — the dispatch isn't hitting the reducer. Most common cause: `CentraProvider` is being re-created every render because `checkoutAPIClient` isn't memoised. The `useMemo` in step 6 is not optional.
+
+**`"your-tenant-id isn't a valid URL"` from `BffClient`** — the BFF URL resolved to the tenant id. Your `GEARS_ENVIRONMENT` or `GEARS_DOMAIN` env var is wrong and `useGearsServiceUrl("bff")` fell back to `tenantId`.
+
+## Related packages
+
+- `@made-people/gears-configuration` — provider + the service-URL hooks
+- `@made-people/gears-remix` — `gearsRootLoader`, `gearsLoader`, `gearsMeta`, `gearsAction`
+- `@made-people/gears-bff-client` — `BffClient`, `fetchPage`, `fetchSettingsAndContent`
+- `@made-people/grease-centra` — `CentraProvider`, `CentraCartClientDriver`, product mappers
+- `@made-people/grease-cart` — `useCartState`, `useCartMethod`, `useUpdateCart`
+- `@made-people/grease-product` — `ProductProvider`, `useProductOptions`, `useProductBase`
+- `@made-people/centra-checkout-api` — `createCentraCheckoutAPIClient`, `CentraLocalStorageTokenHandler`
+- `@made-people/nestjs-bff-service` — shared types (`FrontendContextV1`, `CentraProductPage`, `FrontendProduct`)
+
+## Where to go next
+
+You've got a PDP and a cart. To turn this into a real storefront:
+
+- [Implementing Checkout](./checkout) — mount `CentraCheckout`, wire up payment and shipping
+- [Account & Orders](./account) — login, registration, order history
+- [Voyado Engage](./implementing-voyado-engage) — newsletter, identification, order tracking
+- [Storyblok](./storyblok) — CMS pages, category landings, component transformers
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — the conventions behind the file layout you just built

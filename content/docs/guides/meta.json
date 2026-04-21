@@ -2,6 +2,7 @@
   "title": "Guides",
   "pages": [
     "getting-started",
+    "tutorial",
     "anatomy-of-a-gears-client",
     "---Commerce core---",
     "cart",
@@ -9,12 +10,17 @@
     "product",
     "account",
     "---Integrations---",
+    "centra",
     "implementing-voyado-engage",
     "storyblok",
-    "centra",
     "algolia",
     "growthbook",
     "gtm",
-    "ingrid"
+    "ingrid",
+    "---Patterns---",
+    "blueprint",
+    "build-a-blueprint-component",
+    "with-managed-props",
+    "with-zod"
   ]
 }

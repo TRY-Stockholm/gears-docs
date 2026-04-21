@@ -1,0 +1,234 @@
+---
+title: Blueprint
+description: The presentational UI component family in Gears — how it relates to Grease, how clients consume and skin components, and the conventions every Blueprint package follows
+---
+
+## What you'll learn
+
+What Blueprint is, how it differs from Grease, and the three ways a client consumes a Blueprint component. By the end you should be able to read any `src/frontend/blueprint/*` package and predict its shape, and know where to reach when you need to skin, wrap, or extend one.
+
+## 1. What Blueprint is
+
+Blueprint is the **presentational UI layer** for Gears clients. Every package under `src/frontend/blueprint/` publishes as `@made-people/blueprint-<name>` and ships one self-contained UI component — a button, a product card, a drawer, a cart item. Blueprint components own markup, slot structure, variants, and Tailwind class names. They know nothing about where data comes from. They take props, they render DOM.
+
+Blueprint is the sibling of **Grease** (`src/frontend/grease/`), which is the data and flow layer: Centra cart state, product fetching, search wiring, translations, link routing. A client composes pages by pulling data through Grease hooks and rendering it through Blueprint components.
+
+## 2. The two-layer split
+
+The division is consistent across the codebase. Grease owns "what is true right now"; Blueprint owns "what it looks like."
+
+| Concern | Grease | Blueprint |
+|---|---|---|
+| Cart state, mutations | `grease-cart` | — |
+| The row in the mini-cart | — | `blueprint-cart-item` |
+| Product data, variants, stock | `grease-product` | — |
+| The product card on a PLP | — | `blueprint-product-card` |
+| Translation lookups | `grease-translations` | — |
+| The rendered label string | — | `blueprint-button` |
+| Link resolution (locale, tracking) | `grease-link` | — |
+| The `<a>` element and hover styles | — | `blueprint-button` / `blueprint-link` |
+
+A Blueprint component never imports `grease-cart` at runtime to read state. If it needs cart-ish props, the caller passes them. This lets Storybook render the same component with mock data and the client render it with live data, unchanged.
+
+## 3. How clients consume Blueprint
+
+There are exactly three patterns. You will see all three in every client.
+
+### Import as-is
+
+For components that don't need per-client tweaks — `blueprint-drawer`, `blueprint-overlay`, `blueprint-slider` — a client imports and renders directly. Default Tailwind classes are fine.
+
+### Skin via `blueprint.override()`
+
+Most visual differences between Stronger and Dedicated come from overriding slot classes, not forking components. Each Blueprint package exports a `blueprint` object (the `<Name>Blueprint` on the `/blueprint` subpath) whose `.override()` method replaces slot class strings. Clients keep these overrides next to each other:
+
+```
+client-frontends/stronger/app/project/blueprint/components/text-block/blueprint.ts
+client-frontends/dedicated/app/project/blueprint/components/text-block/blueprint.ts
+```
+
+From `client-frontends/stronger/app/project/blueprint/components/text-block/blueprint.ts`:
+
+```ts
+import { textBlockBlueprint } from "@made-people/blueprint-text-block/blueprint";
+
+textBlockBlueprint.override({
+  slots: {
+    base: "flex flex-col gap-3",
+    truncateButton: "text-label-md w-fit underline underline-offset-4",
+    p: "text-body-sm lg:text-body-md mb-3 last:mb-0",
+    // ...
+  },
+  variants: { /* ... */ },
+});
+```
+
+Alongside this, a `default-props.tsx` file supplies per-client default variant choices via managed-props, so Stronger and Dedicated render the same `<TextBlock/>` with different typography sizes without either client touching component internals.
+
+### Wrap in a client-specific template
+
+When the shape of the UI differs in ways a skin can't express — a bespoke topbar layout, a custom footer, a client's product card template — the client writes a wrapper component that feeds a Blueprint component. Examples:
+
+- `client-frontends/stronger/app/project/components/global/stronger-topbar.tsx` wraps `blueprint-topbar`, selecting a "fade" template and merging Storyblok story data.
+- `client-frontends/stronger/app/project/components/product-list-components/ProductListContentComponents.tsx` assembles product-list pieces.
+- `client-frontends/dedicated/app/project/components/global/Footer.tsx` wraps `blueprint-footer`.
+
+Rule of thumb: try to skin first, wrap only when the template shape itself needs to change.
+
+## 4. Anatomy of a Blueprint package
+
+A real listing from `src/frontend/blueprint/product-card/`:
+
+```
+product-card/
+├── README.md
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+├── eslint.config.mjs
+├── jest.config.js
+├── config/
+├── test/
+└── src/
+    ├── ProductCard.tsx         # the exported component (withManagedProps + withZod)
+    ├── TemplateSelector.tsx    # template dispatch
+    ├── blueprint.ts            # slot + variant definitions (the skinnable surface)
+    ├── components/             # internal subcomponents
+    │   ├── badges/
+    │   ├── details/
+    │   ├── gallery/
+    │   ├── quickshop/
+    │   ├── swatches/
+    │   └── templates/
+    ├── hooks/
+    └── mock-data/
+```
+
+Four things to know about the shape:
+
+- **Two entry points.** `package.json` `exports` exposes both `.` (the React component) and `./blueprint` (the slot/variant object used for skinning). Barrels are regenerated by `barrelsby` on build.
+- **`blueprint.ts` is the theming surface.** It calls `createBlueprint({ slots, variants, defaultVariants })` from `@made-people/blueprint`. Clients import this from `@made-people/blueprint-<name>/blueprint` and call `.override()`.
+- **Build is Vite + `tsc --noEmit`.** `npm run build` runs `barrelsby && tsc --noEmit && vite build`. Per CLAUDE.md: don't use `rush build --to`; `cd` into the package and run `npm run build`.
+- **Peer deps pin React, Tailwind, managed-props, and any sibling Blueprint packages.** A Blueprint package never bundles React or `clsx`; the consuming client provides them.
+
+## 5. The theme
+
+Blueprint components reference Tailwind tokens like `text-body`, `bg-background-page`, `border-border-sharp`, `text-heading-lg`. These are not global Tailwind defaults — they're defined in each client's `tailwind-theme.ts`, which maps to CSS custom properties:
+
+- `client-frontends/dedicated/app/project/tailwind-theme.ts`
+- `client-frontends/stronger/static/tokens/tailwind-theme.ts`
+- `client-frontends/miss-mary/app/styles/tailwind-theme.ts`
+- `development-utilities/storybook-react/client/tailwind-theme.ts` (what Storybook renders against)
+
+The shape is `Partial<Config>` exporting `colors`, spacing, fonts, and typography scales. Colors almost always resolve to `rgb(var(--color-*))`, so swapping a palette is a matter of redefining the CSS variables per market, theme, or campaign without touching Blueprint packages.
+
+When you're adding a new token, add it to every client's `tailwind-theme.ts` and to the Storybook theme so components render the same locally as in production.
+
+## 6. Storybook
+
+Every Blueprint component is explored through the shared Storybook at `development-utilities/storybook-react/`. Run it with:
+
+```bash
+rush storybook
+```
+
+Under the hood this runs `cd ./development-utilities/storybook-react && npm run storybook-react` (see `common/config/rush/command-line.json`). Storybook loads the Blueprint packages via workspace symlinks and renders them against `development-utilities/storybook-react/client/tailwind-theme.ts`, so what you see there is the neutral baseline — before any client skin is applied.
+
+Use Storybook as your catalogue when deciding whether to reuse a component or build a new one. If something looks 80% right in Storybook, skin it; if it's fundamentally different, wrap it.
+
+## 7. The generator: `rush create-ui-component`
+
+New Blueprint components start from a scaffold.
+
+```bash
+rush create-ui-component
+# prompted: "Enter the name of the new component:"
+```
+
+The script lives at `development-utilities/cool-rush-tools/src/create-ui-component.ts`. What it does:
+
+1. Copies the boilerplate at `development-utilities/boilerplates/ui-components/standard-component/` into `src/frontend/ui-components/<PascalName>/`.
+2. Renames files and in-file identifiers: `standard-component` → kebab-case name, `StandardComponent` → PascalCase name.
+3. Copies a matching Tailwind variants file into `development-utilities/storybook-react/client/ui-components/<kebab-name>.ts`.
+4. Registers the new package in `rush.json` under `@made-people/ui-components-<kebab-name>`.
+
+What you get out of the box: `*.tsx` component file, `*.stories.tsx`, `*.mdx`, `package.json` with the right peer deps, a Storybook-side variants file.
+
+Note: the script currently writes into `src/frontend/ui-components/`, which predates the `blueprint/` split. Newer components are hand-authored or moved into `src/frontend/blueprint/`. Check neighboring packages for the current conventions before publishing.
+
+## 8. The two patterns every Blueprint component uses
+
+Open any Blueprint component file and you'll see the same wrapping pair. From `src/frontend/blueprint/product-card/src/ProductCard.tsx`:
+
+```tsx
+import { withManagedProps } from "@made-people/managed-props";
+import { withZod } from "@made-people/react-prop-guard";
+import { z } from "zod";
+
+export const productCardPropsSchema = z.object({
+  templateProps: productCardSchema.optional(),
+});
+
+export const ProductCard = withManagedProps(
+  "ProductCard",
+  withZod(productCardPropsSchema, (props) => {
+    const templateProps = props.templateProps || { template: "1" };
+    return <SelectTemplate {...templateProps} />;
+  }),
+);
+```
+
+Two non-negotiable wrappers:
+
+- **`withManagedProps`** registers the component with the managed-props system so clients can inject default props from `default-props.tsx` without prop-drilling. See the [managed-props pattern guide](./with-managed-props).
+- **`withZod`** validates incoming props at runtime. If a CMS payload drifts and the component receives the wrong shape, `withZod` surfaces a readable error instead of a cryptic render crash. See the [zod validation pattern guide](./with-zod).
+
+Both wrappers are applied at the module boundary — never inside render, never conditionally.
+
+## Representative Blueprint packages
+
+| Package | What it owns |
+|---|---|
+| `@made-people/blueprint-button` | Polymorphic button (as `button`, `a`, or `span`) with slot variants |
+| `@made-people/blueprint-product-card` | Product card templates, badges, swatches, quickshop, wishlist |
+| `@made-people/blueprint-product-list` | PLP grid layout and product-list content slots |
+| `@made-people/blueprint-cart-item` | Cart/mini-cart row with quantity controls and price breakdown |
+| `@made-people/blueprint-mini-cart` | Mini-cart shell and summary |
+| `@made-people/blueprint-drawer` | Reusable side drawer primitive |
+| `@made-people/blueprint-overlay` | Modal/backdrop primitive |
+| `@made-people/blueprint-slider` | Content slider |
+| `@made-people/blueprint-accordion` | Accordion groups |
+| `@made-people/blueprint-text-block` | CMS text block with markdown slots and layout variants |
+
+This is a slice — `src/frontend/blueprint/` holds roughly 90 packages.
+
+## Gotchas
+
+- **Overriding a slot that doesn't exist.** `.override({ slots: { baz: "..." } })` silently no-ops. Cross-check the slot name in the Blueprint package's `blueprint.ts`.
+- **Importing from the wrong entry point.** The component lives at `@made-people/blueprint-x`; the skinning object lives at `@made-people/blueprint-x/blueprint`. Mixing these up leaves you calling `.override()` on `undefined`.
+- **Hard-coded Tailwind values.** Per CLAUDE.md, never use `bg-[#f4f4f5]` — look up the token in `tailwind-theme.ts` first. Blueprint packages should not ship hex codes in class strings.
+- **Trying to read Grease state from Blueprint internals.** Don't. If a Blueprint component needs cart or product data, the client passes it as props. Reading Grease from inside Blueprint breaks Storybook and couples the layers.
+- **Forgetting to run `rush update` after adding a new Blueprint dependency.** Peer deps don't resolve until Rush re-symlinks.
+- **Amending vs. overriding.** `.override()` replaces slot strings wholesale — any class you leave out is gone. If you only want to append, concatenate the base string.
+
+## Troubleshooting
+
+**Component renders but looks unstyled** — the client's `tailwind-theme.ts` is missing a token the component references (e.g. `text-heading-lg`). Add it, restart the dev server.
+
+**`"Invalid props passed to X"` in the console** — `withZod` caught a schema mismatch. The error lists the failing path; fix the CMS payload or widen the schema.
+
+**Override doesn't apply** — either the import path is wrong (`@made-people/blueprint-x` instead of `@made-people/blueprint-x/blueprint`), or the `.override()` call runs after the component has already rendered. Overrides must be registered at module load, before the first render.
+
+**Storybook shows the component but the client doesn't** — the client never installed the package, or `rush update` didn't run after you edited `package.json`. Check the client's `package.json` peer deps against the Blueprint package's peer deps.
+
+**`rush create-ui-component` puts the package in the wrong folder** — known, see the note in section 7. Move the folder into `src/frontend/blueprint/` manually and update the `projectFolder` path in `rush.json`.
+
+## Related packages
+
+- `@made-people/blueprint` — `createBlueprint`, the slot/variant engine every Blueprint package uses
+- `@made-people/managed-props` — `withManagedProps` and the default-props plumbing
+- `@made-people/react-prop-guard` — `withZod` runtime prop validation
+- `@made-people/grease-*` — the data/flow layer that feeds Blueprint components
+- `tailwind-variants` — used inside each client's `tailwind-theme.ts` and by the Storybook styling files
+
+**Next:** [Build a Blueprint component](./build-a-blueprint-component) · [Anatomy of a Gears Client](./anatomy-of-a-gears-client)
