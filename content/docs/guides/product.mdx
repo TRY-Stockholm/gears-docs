@@ -3,15 +3,23 @@ title: Implementing Product
 description: Wire up grease-product for product types, variants, attribute mappers, and product-detail / product-list routes in a client frontend
 ---
 
-## What this guide covers
+## What you'll learn
 
-How to mount `@made-people/grease-product` so the shared `Product` data model drives PDPs, product cards, size/variant pickers, and attribute-driven UI. It also shows the Centra-attributes → grease-attributes mapping layer that is always client-specific.
+How `@made-people/grease-product` turns a backend product payload into a typed `Product`, how variants and attributes are exposed through hooks, and where the per-client attribute mapper plugs in.
+
+## The five things to know
+
+1. **There is no root-level product provider.** `ProductProvider` mounts per product — once on a PDP, once per card on a PLP.
+2. **`Product` is a discriminated union on `dataModel`.** The provider dispatches to a `simple`, `with_variants`, or `bundle` branch internally.
+3. **Attributes are the extension point.** `ProductBase.attributes` is a free-form `Attribute[]`; clients normalize Centra's raw keys with a chain of pure mapper functions.
+4. **Hooks are scoped.** Every `useProduct*` hook throws outside `ProductProvider`. Use `useMaybeProductBase` when the caller is legitimately optional.
+5. **Schemas are guarded at runtime.** Props pass through `withZod`; a mis-shaped `product` throws on mount in development.
 
 ## Prerequisites
 
-- A commerce backend that can produce products — in the monorepo this is a Centra BFF response (`CentraProductPage.productData`) piped through `@made-people/grease-centra`.
-- The providers from the [Anatomy of a Gears client](./anatomy-of-a-gears-client.mdx) guide already mounted (`GearsConfigurationProvider`, `TranslationsProvider`, `LinkProvider`, `ImageProcessorProvider`, plus `CentraBootstrap` or your equivalent).
-- A per-client attribute-mapper layer. Every client re-interprets Centra's raw attribute keys, so this code lives in `client-frontends/<client>/app/project/mappers/` rather than in the grease package.
+- A backend that produces products — in this monorepo, `CentraProductPage.productData` from the BFF piped through `@made-people/grease-centra`.
+- The providers from [Anatomy of a Gears client](./anatomy-of-a-gears-client) already mounted.
+- A per-client attribute-mapper layer under `client-frontends/<client>/app/project/mappers/`.
 
 ## Install
 
@@ -19,149 +27,157 @@ How to mount `@made-people/grease-product` so the shared `Product` data model dr
 bun add @made-people/grease-product
 ```
 
-Pin peer deps at the ranges in the package's `peerDependencies` — currently `react@18.2.0`, `react-dom@18.2.0`, `zod@^3.22.4`, `@made-people/grease-event-emitter@~0.4.1`, `@made-people/react-prop-guard@~1.6.1`, `@made-people/react-use-effect-once@~0.3.1`. The schemas are enforced at runtime with `withZod`, so a mismatched peer will throw on mount.
+Current version is `1.29.0`. Peer deps must match exactly: `react@18.2.0`, `react-dom@18.2.0`, `zod@^3.22.4`, `@made-people/grease-event-emitter@~0.4.1`, `@made-people/react-prop-guard@~1.6.1`, `@made-people/react-use-effect-once@~0.3.1`.
 
-## Product types
+> **Peer mismatches throw.** Schemas are enforced at runtime with `withZod`, so a bad peer range surfaces as a mount-time error, not a build warning.
 
-`Product` is a zod discriminated union on `dataModel`. All variants share `ProductShared` (`base: ProductBase` + `siblingProducts`).
+## 1. The product type
+
+`Product` is a zod discriminated union. All branches share `ProductShared` (`base: ProductBase` + `siblingProducts`).
 
 ```ts
 // from @made-people/grease-product
 type Product =
-  | ProductSimple            // dataModel: "simple"
-  | ProductWithVariants      // dataModel: "with_variants"
-  | ProductBundle;           // dataModel: "bundle"
-
-type ProductBase = {
-  productId: string;
-  productKey: string;          // a.k.a. model ID
-  slug: string;
-  discontinued: boolean;
-  content: ProductContent;     // localizable fields
-  attributes: Attribute[];     // free-form, client-interpreted
-  categories: ProductCategory[];
-};
-
-type Attribute<T = unknown> = {
-  attributeKey: string;
-  attributeLabel: string;
-  value: T;
-  valueLabel: string;
-};
+  | ProductSimple        // dataModel: "simple"
+  | ProductWithVariants  // dataModel: "with_variants"
+  | ProductBundle;       // dataModel: "bundle"
 ```
 
-`ProductBase`, `content`, and `categories` are backend-agnostic. `attributes` is the escape hatch for anything the base schema doesn't cover (color swatches, fabric, shipping copy, tracking IDs, etc.).
+`ProductBase` is backend-agnostic (`productId`, `productKey`, `slug`, `content`, `categories`, …). `attributes: Attribute[]` is the escape hatch for anything the base schema doesn't cover.
 
-## Attribute mappers
+## 2. Hooks by purpose
 
-Centra exposes arbitrary attribute keys (`swatch`, `fabric`, `pr_designer`…) with different shapes per tenant. Each client defines a small, pure function per attribute that safeParses the raw value and returns a normalized `Attribute` — or `undefined` if it doesn't match. Real example from Dedicated:
+`grease-product` ships 35+ hooks (27 core + 8 bundle-specific). Group them mentally before reaching for one:
 
-```ts
-// client-frontends/dedicated/app/project/mappers/product-attributes/get-color-swatch-attribute.ts
-import { z } from "zod";
-import { ProductBase, Attribute } from "@made-people/grease-product";
+| Group | Hooks |
+|---|---|
+| Base / shape | `useProductBase`, `useMaybeProductBase`, `useProductDataModel`, `useProductProviderContext` |
+| Variants | `useProductVariant`, `useProductVariants`, `useProductVariantState`, `useProductVariantDispatch`, `useSelectedVariantId`, `useProductVariantDimensions`, `useVariantMissingDimensions` |
+| Attributes | `useProductAttribute`, `useProductAttributeGetter`, `useMediaAttributeGetter` |
+| Media & options | `useProductImages`, `useProductOptions` |
+| Inventory | `useProductInventory`, `useProductIsInStock`, `useProductHasOptionsInStock` |
+| Pricing & purchase | `useProductPriceInfo`, `useProductPurchaseInfo`, `useProductPurchaseStatus` |
+| Siblings & related | `useProductSiblings`, `useRelatedProducts` |
+| Misc | `useProductSpecifications`, `useProductEventData`, `useProductVariantEventData` |
 
-export const COLOR_SWATCH_KEY = "color-swatch";
+Bundle-specific hooks live under `hooks/bundle/`: `useBundleProduct`, `useBundleState`, `useBundleDispatch`, `useBundlePurchaseInfo`, `useBundlePurchaseStatus`, `useBundleOptions`, `useBundleItemId` — plus section variants (`useBundleSectionActiveProduct`, `useBundleSectionProductAlternatives`) for section-scoped rendering.
 
-export function getColorSwatchAttribute(
-  productAttributes: ProductBase["attributes"],
-): Attribute | undefined {
-  const swatchAttribute = productAttributes.find(
-    (a) => a.attributeKey === "swatch",
-  )?.value;
-  const result = z.object({ hex: z.string(), desc: z.string() })
-    .safeParse(swatchAttribute);
-  if (!result.success) return undefined;
-  return {
-    attributeKey: COLOR_SWATCH_KEY,
-    attributeLabel: COLOR_SWATCH_KEY,
-    valueLabel: result.data.desc,
-    value: result.data.hex,
-  };
-}
+## 3. The provider dispatches on `dataModel`
+
 ```
-
-All getters are composed once per product in `get-product-attributes.ts`, then plugged into the Centra mapper as `centraCheckoutApiProductToGreaseProductExtraAttributes`. Downstream code reads them with the zod-guarded hook:
-
-```ts
-import { useProductAttributeGetter, useProductBase } from "@made-people/grease-product";
-const attr = useProductAttributeGetter(useProductBase())("color-swatch", z.string());
+ProductProvider (withZod guard, fires productViewed)
+  ├─ dataModel === "simple"          → ProductSimpleProvider
+  ├─ dataModel === "with_variants"   → ProductWithVariantsProvider
+  └─ dataModel === "bundle"          → BundleProductProvider
 ```
-
-## Wire up the provider
-
-There is no bootstrap-level provider for products — `ProductProvider` is mounted per product, on every route or card that renders one. It internally dispatches on `dataModel` to one of three inner providers (simple / with-variants / bundle), fires the `productViewed` event, and exposes `useProductBase`, `useProductVariant`, `useProductPurchaseInfo`, siblings, related products, etc.
 
 ```tsx
 <ProductProvider
   product={product}
   relatedProducts={relatedProducts}
-  context={{ type: "pdp" }}   // or { type: "plp", listId, listName, position }
+  context={{ type: "pdp" }}  // or { type: "plp", position } — listId / listName are optional extras
 >
   {children}
 </ProductProvider>
 ```
 
-The `context` prop tags outgoing events so GTM / tracking listeners can distinguish PDP views from impressions in a list.
+The `context` prop tags outgoing events so GTM listeners can tell a PDP view apart from an impression in a list. `ProductProvider` also accepts an optional `fireOnMount: boolean` — when true, `productViewed` fires immediately instead of waiting for the in-viewport check. Useful for SSR or above-the-fold PDPs where you know the product is visible.
 
-## PDP (product detail page)
+## 4. Attribute mappers — the integration point
 
-Dedicated's PDP lives in `client-frontends/dedicated/app/gears/routes/centra-product-page-route.tsx`. It maps the BFF payload into a grease `Product` and hands it to the provider:
+Centra emits arbitrary attribute keys (`swatch`, `fabric`, `pr_designer`, …) with different shapes per tenant. Each client defines one pure function per attribute that safeParses the raw value and returns a normalized `Attribute` — or `undefined` if it doesn't match.
 
-```tsx
-import { ProductProvider } from "@made-people/grease-product";
-import { ProductTemplate } from "@made-people/blueprint-product";
-import { frontendProductToGreaseProduct } from "../../project/mappers/frontend-product-to-grease-product";
-
-export const CentraProductPageRoute = ({ page, frontendContext }) => (
-  <ProductProvider
-    product={frontendProductToGreaseProduct(page.productData, frontendContext)}
-    context={{ type: "pdp" }}
-  >
-    <BreadCrumbsProvider breadCrumbs={page.breadCrumbs}>
-      <ProductTemplate template="graz" /* … size picker, swatches, … */ />
-    </BreadCrumbsProvider>
-  </ProductProvider>
-);
+```ts
+// client-frontends/dedicated/app/project/mappers/product-attributes/get-color-swatch-attribute.ts
+export const COLOR_SWATCH_KEY = "color-swatch";
+export function getColorSwatchAttribute(
+  productAttributes: ProductBase["attributes"],
+): Attribute | undefined {
+  const swatch = productAttributes.find((a) => a.attributeKey === "swatch")?.value;
+  const result = z.object({ hex: z.string(), desc: z.string() }).safeParse(swatch);
+  if (!result.success) return undefined;
+  return {
+    attributeKey: COLOR_SWATCH_KEY,
+    attributeLabel: COLOR_SWATCH_KEY,
+    valueLabel: result.data.desc,
+    value:
+      result.data.hex ||
+      "https://tshirtstore.centracdn.net/client/dynamic/attributes/ams-multicolor_6851_jpg.jpg",
+  };
+}
 ```
 
-`ProductTemplate` and its children resolve the selected `ProductVariant` via `useProductVariant` / `useSelectedVariantId`; the size picker reads `useProductVariants()` + `useProductVariantDimensions()`; swatches read siblings via `useProductSiblings()`.
+> **Note:** that hard-coded fallback URL is legacy — probably test leakage from an older tenant. Worth auditing in a client rewrite; a missing `hex` should almost certainly return `undefined` rather than a stock image.
 
-Stronger's equivalent route adds a bundle branch that waits for `useCentraSelectionResponse()` and `useCentraBundleResponse()` before building the product with `makeStrongerProductMapper(frontendContext)`.
+Getters compose once per product in `client-frontends/dedicated/app/project/mappers/get-product-attributes.ts` (one level above the `product-attributes/` folder that holds the individual getters), then feed the Centra mapper as `centraCheckoutApiProductToGreaseProductExtraAttributes` — wired up in `client-frontends/dedicated/app/project/mappers/centra/dedicated-product-attributes.ts`. Downstream code reads them with the zod-guarded hook:
 
-## PLP (product list / category)
+```ts
+const attr = useProductAttributeGetter(useProductBase())("color-swatch", z.string());
+```
 
-Neither Dedicated nor Stronger has a dedicated category route — category pages render through `storyblok-page-route.tsx`, and search renders through `search-page-route.tsx` with `DepictSearchResultsProvider`. The product-card layer wraps each card in its own provider with `plp` context:
+## 5. PDP and PLP shapes
+
+Dedicated's PDP (`client-frontends/dedicated/app/gears/routes/centra-product-page-route.tsx`) maps the BFF payload and hands it to the provider:
+
+```tsx
+<ProductProvider
+  product={frontendProductToGreaseProduct(page.productData, frontendContext)}
+  context={{ type: "pdp" }}
+>
+  <BreadCrumbsProvider breadCrumbs={page.breadCrumbs}>
+    <ProductTemplate template="graz" />
+  </BreadCrumbsProvider>
+</ProductProvider>
+```
+
+Stronger's route adds a bundle branch that waits for `useCentraSelectionResponse()` and `useCentraBundleResponse()`, then runs the response through `filterFeedImagesFromBundleResponse(bundleResponse)` and converts the frontend product via `frontendProductToCheckoutApiProduct(page.productData)` before feeding both into `makeStrongerProductMapper(frontendContext)`.
+
+Neither client has a dedicated category route — category pages render through `storyblok-page-route.tsx`, and search renders through `search-page-route.tsx` with `DepictSearchResultsProvider`. The product-card layer wraps each card per-item:
 
 ```tsx
 // src/frontend/blueprint/search/src/components/product-list/ProductList.tsx
 <ProductProvider
   product={product}
-  context={{ type: "plp", listId, listName, position }}
+  context={{ type: "plp", position: index }}
 >
   <ProductCard />
 </ProductProvider>
 ```
 
-Filter / query composition lives in the listing provider (Depict for these two clients) — grease-product only renders the resulting products.
+Note: `ProductProviderContextPLP` allows `listId` and `listName` as optional extras, but this wrapper doesn't set them. If you need them for analytics, pass them from a higher-level list context.
 
 ## Gotchas
 
-- **Attribute getters must be pure** and `undefined`-tolerant. They run during mapping (SSR) and must not touch React or browser APIs.
-- **Centra raw shape leaks through.** `ProductBase.attributes[i].value` is `unknown`; always `safeParse` before use. A missing key returns `undefined`, not `null`.
-- **`withZod` guards props at runtime.** Passing a mis-shaped `product` to `<ProductProvider>` throws in development — check your mapper output, not the provider.
-- **SEO / structured data** is produced separately via `@made-people/grease-structured-data` using `greaseProductToUnformattedStructuredDataProduct`; wire it at bootstrap, not inside `ProductProvider`.
-- **Sibling products** are deduped against `product.base.productId` and JSON-cloned to keep React identities stable — don't pass the same object reference twice.
-
-## Related packages
-
-- `@made-people/grease-centra` — ships the `makeCentraCheckoutApiProductToGreaseProductMapper` that most clients wrap.
-- `@made-people/grease-depict` / `@made-people/grease-algolia` — the listing/search provider whose results feed the `plp` ProductProvider.
-- `@made-people/grease-cart` — reads `itemId` / `ProductPurchaseInfo` from the provider for add-to-cart.
-- `@made-people/grease-voyado-engage` — consumes the `voyadoEngageTracking` attribute you attach in the mapper.
+- **Attribute getters must be pure** and `undefined`-tolerant. They run during SSR mapping; no React, no browser APIs.
+- **Centra raw shape leaks through.** `ProductBase.attributes[i].value` is `unknown`; always `safeParse`. A missing key returns `undefined`, not `null`.
+- **`withZod` guards props at runtime.** A mis-shaped `product` throws in development — check your mapper output, not the provider.
+- **Sibling products** — the base product is pushed into the sibling list if not already present; then the list is JSON-cloned and sorted by `productId.localeCompare` to keep React identities stable across renders. Don't pass the same reference twice.
+- **SEO lives elsewhere.** Structured data is produced via `@made-people/grease-structured-data` using `greaseProductToUnformattedStructuredDataProduct`, wired at bootstrap — not inside `ProductProvider`.
 
 ## Troubleshooting
 
-- **"Unknown product data model" warning and blank render** — your mapper emitted a `dataModel` string the provider doesn't know. Fix the Centra mapper; don't edit the product schema.
-- **`useProductBase must be used within a ProductProvider`** — a card or hook rendered outside the provider (common in Storyblok components that forget to wrap items). Use `useMaybeProductBase` if the caller is legitimately optional.
-- **Attribute hooks return `undefined`** — either the Centra side didn't emit the key, or the zod guard rejected it. Log the raw `ProductBase.attributes` and tighten/loosen the schema in the getter.
+**`useProductBase must be used within a ProductProvider`** — a card or hook rendered outside the provider (common in Storyblok components that forget to wrap items). Use `useMaybeProductBase` if the caller is legitimately optional.
+
+**"Unknown product data model" warning and blank render** — your mapper emitted a `dataModel` string the provider doesn't know. Fix the Centra mapper; don't edit the product schema.
+
+**Attribute hooks return `undefined`** — either Centra didn't emit the key, or the zod guard rejected it. Log the raw `ProductBase.attributes` and tighten or loosen the schema in the getter.
+
+## Package surface extras
+
+A few non-hook exports worth knowing about:
+
+- `ProductLink` (`src/components/product-link.tsx`) — a thin wrapper around `grease-link` that emits a `productClicked` event from the current provider's event data and closes any open overlay. Use this over raw `<Link>` when linking from product cards or related-product grids.
+- `getVariantFromOptions` — resolves a variant id from a set of `ProductOption` selections.
+- `variantsToProductOptionGroups` — flips `ProductVariant[]` into the grouped `ProductOptionGroup[]` shape consumed by option pickers.
+- `filterMediaOnAttributeValues` — filters a product's media array by attribute values (e.g. only images tagged with the selected color). Real filename has a typo: `filter-media-on-atribute-values.ts`.
+
+All exports are surfaced through `src/index.ts`, which is barrel-generated at build time by `barrelsby` — don't hand-edit it.
+
+## Related packages
+
+- `@made-people/grease-centra` — ships `makeCentraCheckoutApiProductToGreaseProductMapper` that most clients wrap.
+- `@made-people/grease-depict` / `@made-people/grease-algolia` — listing providers whose results feed the `plp` `ProductProvider`.
+- `@made-people/grease-cart` — reads `itemId` / `ProductPurchaseInfo` from the provider for add-to-cart.
+- `@made-people/grease-voyado-engage` — consumes the `voyadoEngageTracking` attribute attached in the mapper.
+
+**Next:** [Cart](./cart) · [Checkout](./checkout) · [Account & Orders](./account) · [Voyado Engage](./implementing-voyado-engage)

@@ -50,7 +50,7 @@ GearsConfigurationProvider          ← outermost, required
       └─ children
 ```
 
-Order matters because inner providers read values from outer ones. For example, `VoyadoEngageProvider` reads the cart reference from Centra's token handler, so it must sit **inside** `CentraBootstrap`.
+Order matters because inner providers read values from outer ones. For example, providers that read Centra cart state must sit inside `CentraBootstrap`. Clients differ on where they put `VoyadoEngageProvider`: Dedicated wraps it inside (`engage-bootstrap.tsx`), Stronger wraps it outside and feeds in a cart reference separately.
 
 Real examples: `client-frontends/stronger/app/project/bootstrap.tsx` and `client-frontends/dedicated/app/project/bootstrap/bootstrap.tsx`.
 
@@ -76,8 +76,8 @@ Inside a route, only reach into gears config for URLs and tenant values. Everyth
 Each page receives a `FrontendContextV1` object — the per-request store context. Core fields:
 
 - `market` — numeric Centra market id (as a string)
-- `marketName` — human code like `"SE"` (optional, often defaulted)
-- `country`, `language`, `currency`, `pricelist`
+- `marketName` — human code like `"SE"` (optional; clients typically default to a code like `"SE"`)
+- `country`, `language`, `currency` (object; `currencyCode` is the deprecated string form), `pricelist`
 - `baseUrl`, `siteSlug`
 - Optional `campaignSite`
 

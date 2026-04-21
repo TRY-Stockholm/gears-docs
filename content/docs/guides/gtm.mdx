@@ -3,26 +3,26 @@ title: Implementing GTM
 description: Wire up Google Tag Manager in a client frontend for ecommerce events and analytics
 ---
 
-## What this guide covers
+## What you'll learn
 
-How to mount `@made-people/grease-gtm` in a React client frontend so Google Tag Manager is loaded and GA4-style ecommerce events (`add_to_cart`, `view_item`, `purchase`, etc.) are pushed automatically from grease cart/order/product emitters.
+How to mount `@made-people/grease-gtm` so GTM loads and GA4-style ecommerce events push automatically from grease cart, order, and product emitters.
 
-## Prerequisites
+## The four things to know
 
-- A React client frontend that can import `@made-people/grease-gtm`
-- One or more GTM container IDs (e.g. `GTM-XXXXXX`) — in the dedicated client these come from `rootLoaderData.settingsAndContentResponse.gtm?.containerIds`
-- A currency code available at bootstrap (merged into every ecommerce push)
-- Peer deps at the ranges in `peerDependencies`: `@made-people/grease-order`, `@made-people/grease-ui-events`, `@made-people/react-use-effect-once`, `react`, `sha.js`, `zod`
+1. **Two script tags, one provider.** `GtmScriptHeadTag` injects `gtm.js` client-side (inside a `useEffectOnce`; returns `null` on SSR). `GtmScriptNoscriptTag` renders the `<noscript>` iframe. `GtmProvider` supplies container IDs, global fields, and mappers.
+2. **Events are emitter-driven.** You almost never call grease-gtm directly. Listeners inside the provider subscribe to grease emitters and push GA4 events for you.
+3. **Payloads are zod-validated.** Ecommerce pushes run through `gtmEcommerceEventSchema`. Invalid payloads log an error and drop silently.
+4. **Consent is not included.** The package ships no `gtag('consent', ...)` call. Wire it outside, or gate pushes with `registerDataLayerBeforeHook`.
 
-## Install
+## 1. Install
+
+Package: `@made-people/grease-gtm` (0.19.5). Peer deps: `@made-people/grease-order ~0.10.11`, `@made-people/grease-ui-events ~0.4.1`, `@made-people/react-use-effect-once ~0.3.1`, `react 18.2.0`, `sha.js ~2.4.11`, `zod ^3.22.4`.
 
 ```bash
 bun add @made-people/grease-gtm
 ```
 
-## Load the GTM script
-
-`GtmScriptHeadTag` injects the init snippet and `gtm.js` for every container; `GtmScriptNoscriptTag` renders the `<noscript>` iframe fallback. Both read container IDs from `GtmProvider` via `useGtmContainerIds` (or take a `containerIds` prop).
+## 2. Load the scripts
 
 ```tsx
 import {
@@ -35,12 +35,15 @@ import {
 </head>
 <body>
   <GtmScriptNoscriptTag />
+  {/* … */}
 </body>
 ```
 
-Optional `GtmScriptHeadTag` flags (both default `true`): `addOriginalLocation` (pushes `originalLocation` to prevent Google Ads rogue referrals) and `addFirstBrowserInteractionEvent` (a one-shot Pagespeed Insights trick — do not bind tracking to it).
+Both tags read container IDs from `GtmProvider` via `useGtmContainerIds`, or accept a `containerIds` prop. `GtmScriptHeadTag` has two optional flags, both default `true`: `addOriginalLocation` (prevents Google Ads rogue referrals) and `addFirstBrowserInteractionEvent` (a Pagespeed Insights perf trick — not a tracking signal).
 
-## Wire up the provider
+> **Client-side only.** All script injection happens client-side inside a `useEffectOnce`. `GtmScriptHeadTag` returns `null` on SSR and also returns `null` if `containerIds` is empty at mount — no retry.
+
+## 3. Mount the provider
 
 ```tsx
 import { GtmProvider, GtmProviderProps } from "@made-people/grease-gtm";
@@ -49,42 +52,44 @@ import { dedicatedGtmMappers } from "../mappers/dedicated-gtm-mappers";
 const gtmProviderProps: GtmProviderProps = {
   containerIds:
     rootLoaderData.settingsAndContentResponse.gtm?.containerIds ?? [],
-  globalFields: {
-    ecommerce: { currency: frontendContext.currency.currency! },
-  },
+  globalFields: { ecommerce: { currency: frontendContext.currency.currency! } },
   mappers: dedicatedGtmMappers,
 };
 
 <GtmProvider {...gtmProviderProps}>{children}</GtmProvider>;
 ```
 
-`mappers` is a `Partial<GtmMappers>` that can override `greaseProductToGtmItem`, `greaseLineItemToGtmItem`, `greaseAddressToGtmCustomer`, or `greaseProductBaseToLineItemBase`. Mounting the provider also mounts `GtmEventListeners`.
+`mappers` is a `Partial<GtmMappers>`. Override any of `greaseProductToGtmItem`, `greaseLineItemToGtmItem`, `greaseAddressToGtmCustomer`, or `greaseProductBaseToLineItemBase`. Mounting `GtmProvider` also mounts `GtmEventListeners`.
 
-## Track events
+`globalFields` is typed `{ ecommerce: { currency: string } } & Record<string, unknown>` — the `ecommerce.currency` shape is part of the contract, not arbitrary. Add any other top-level fields you want merged into every push alongside it.
 
-You rarely call grease-gtm directly — the auto-mounted listeners push events when your existing grease APIs fire:
+Need to tweak what the listeners do? `GtmProvider` also takes an optional `eventListeners?: GtmEventListenersProps` escape hatch — e.g. a `selectItem` sub-config — for turning listeners off or customizing their behavior.
 
-- `GtmEventAddToCart` / `GtmEventRemoveFromCart` — subscribe to `cartEventEmitter` and push `add_to_cart` / `remove_from_cart`
-- `GtmEventViewItem` / `GtmEventViewItemList` / `GtmEventSelectItem` — subscribe to `productEventEmitter` and push `view_item`, `view_item_list`, `select_item`
-- `GtmEventBeginCheckout`, `GtmEventAddShippingInfo`, `GtmEventAddPaymentInfo` — checkout funnel
-- `GtmEventPurchase` — listens on `orderEventEmitter.orderPlaced`, pushes `purchase` with totals, vouchers, mapped line items
-- `GtmEventLogin`, `GtmEventSignUp`, `GtmEventPageView`
-- `GtmEventFeatureInteraction` — maps `uiEventEmitter.featureInteraction` to a custom `${feature}_${action}` event
+## 4. What the listeners push
 
-For ad-hoc pushes:
+| Listener | Emitter | GA4 event |
+|---|---|---|
+| `GtmEventAddToCart` / `RemoveFromCart` | `cartEventEmitter` | `add_to_cart`, `remove_from_cart` |
+| `GtmEventViewItem` / `ViewItemList` / `SelectItem` | `productEventEmitter` | `view_item`, `view_item_list`, `select_item` |
+| `GtmEventBeginCheckout` / `AddShippingInfo` / `AddPaymentInfo` | checkout funnel | funnel events |
+| `GtmEventPurchase` | `orderEventEmitter.orderPlaced` | `purchase` with totals, vouchers, items |
+| `GtmEventLogin` / `SignUp` / `PageView` | auth + nav | `login`, `sign_up`, `page_view` |
+| `GtmEventFeatureInteraction` | `uiEventEmitter.featureInteraction` | custom `${feature}_${action}` |
+
+## 5. Ad-hoc pushes
 
 ```tsx
 import { useGtm } from "@made-people/grease-gtm";
 
-const { pushEcommerceEvent, pushCustomEvent } = useGtm();
+const { pushCustomEvent, pushEcommerceEvent } = useGtm();
 pushCustomEvent({ event: "my_custom_event", foo: "bar" });
 ```
 
-`pushEcommerceEvent` is typed against `GtmEcommerceEvent` (a zod discriminated union on `event`); invalid payloads are `console.error`-logged and dropped.
+`pushEcommerceEvent` validates against `GtmEcommerceEvent` (a zod discriminated union on `event`). Invalid payloads are logged via `console.error` and dropped.
 
-## Consent mode
+## 6. Consent mode
 
-Not supported out of the box — there is no `consent` code in the package. Either inject `gtag('consent', ...)` in your own head markup, or gate pushes with `registerDataLayerBeforeHook`:
+Either inject `gtag('consent', ...)` in your own head markup, or gate pushes:
 
 ```ts
 import { registerDataLayerBeforeHook } from "@made-people/grease-gtm";
@@ -94,25 +99,44 @@ registerDataLayerBeforeHook((data) => {
 });
 ```
 
+Returning `false` aborts the push before it reaches `dataLayer`. For tests, `resetDataLayerBeforeHooks()` is exported alongside `registerDataLayerBeforeHook` to clear registered hooks between cases.
+
+## Render tree
+
+```
+<head>
+  └─ <GtmScriptHeadTag />          ← injects gtm.js per container
+<body>
+  ├─ <GtmScriptNoscriptTag />      ← first child, iframe fallback
+  └─ <GtmProvider>                 ← IDs, globalFields, mappers
+      └─ <GtmEventListeners />     ← auto-mounted; subscribes to emitters
+          └─ app
+```
+
 ## Gotchas
 
-- `useGtm` throws outside a `GtmProvider`; use `useGtmContainerIds` for script tags.
-- Bad ecommerce payloads fail zod and are dropped silently (error logged).
+- `useGtm` throws outside a `GtmProvider`. Use `useGtmContainerIds` in the script tags — it returns `[]` when no provider.
+- Bad ecommerce payloads fail zod and drop silently; check the console.
 - Each ecommerce push first writes `{ ecommerce: null }` to reset GTM's auto-merging.
-- `gtmDataLayerPushEvent` warns and noops when `window` is undefined (SSR-safe).
-- `firstBrowserInteraction` is a perf hint, not an analytics event.
-- Wiring verified in `client-frontends/dedicated/app/project/bootstrap/bootstrap.tsx` and `client-frontends/dedicated/app/root.tsx`. Other clients not checked.
-
-## Related packages
-
-- `@made-people/grease-cart` — `addToCart` / `updateQuantity` / `removeFromCart`
-- `@made-people/grease-order` — `orderPlaced`
-- `@made-people/grease-product` — `productViewed`, list/select events
-- `@made-people/grease-ui-events` — `featureInteraction`
+- `gtmDataLayerPushEvent` warns and noops when `window` is undefined — SSR-safe.
+- `firstBrowserInteraction` is a perf hint, not an analytics event. Do not bind GA or FB tracking to it.
+- Wiring verified only in `client-frontends/dedicated/app/project/bootstrap/bootstrap.tsx` and `client-frontends/dedicated/app/root.tsx`. Stronger and Miss Mary not checked.
 
 ## Troubleshooting
 
-- **No events in GTM preview:** `containerIds` was empty at mount — `GtmScriptHeadTag` returns `null` and never injects.
-- **Ecommerce event missing:** zod rejected it; check the console error from `gtmDataLayerPushEcommerceEvent`.
-- **Duplicate items on quantity change:** `GtmEventAddToCart` only pushes a diff when the new quantity is higher.
-- **Purchase missing items:** ensure any `greaseLineItemToGtmItem` override still spreads `defaultGtmMappers.greaseLineItemToGtmItem(...)`.
+**No events in GTM preview** — `containerIds` was empty at mount, so `GtmScriptHeadTag` returned `null`. Check `rootLoaderData.settingsAndContentResponse.gtm?.containerIds`.
+
+**Ecommerce event missing** — zod rejected it. Look for the `console.error` from `gtmDataLayerPushEcommerceEvent`.
+
+**Quantity decrease not tracked** — `GtmEventAddToCart` only pushes when quantity increases (`qtyDiff > 0`); decreases via `updateQuantity` are silently dropped. `remove_from_cart` fires only on real `removeFromCart` events, not on `updateQuantity` decrements.
+
+**Purchase missing items** — a `greaseLineItemToGtmItem` override isn't spreading `defaultGtmMappers.greaseLineItemToGtmItem(...)`. Merge, don't replace.
+
+## Related packages
+
+- `@made-people/grease-cart` — `addToCart`, `updateQuantity`, `removeFromCart`
+- `@made-people/grease-order` — `orderPlaced`
+- `@made-people/grease-product` — `productViewed`, list, select
+- `@made-people/grease-ui-events` — `featureInteraction`
+
+**Next:** [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [Cart](./cart) · [Checkout](./checkout)

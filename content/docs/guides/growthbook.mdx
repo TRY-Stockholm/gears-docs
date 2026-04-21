@@ -3,29 +3,32 @@ title: Implementing GrowthBook
 description: Wire up GrowthBook feature flags and experiments in a client frontend
 ---
 
-## What this guide covers
+## What you'll learn
 
-How to mount `@made-people/grease-growthbook` in a React client frontend to read feature flags, bucket users into experiments, and push overrides into components wired with `withManagedProps` — without flicker on first paint.
+How to mount `@made-people/grease-growthbook` so flags, experiments, and managed-prop overrides are available everywhere below — without flicker on first paint.
 
-## Prerequisites
+## The four things to know
 
-- A GrowthBook account with an SDK Connection (client key + API host, e.g. `https://cdn.growthbook.io`).
-- A server-rendered GrowthBook payload (`FeatureApiResponse`). Miss Mary and Stronger decode this from a `gbState` object delivered by the BFF.
-- Every peer in `peerDependencies`, notably `@growthbook/growthbook`, `@growthbook/growthbook-react`, `@made-people/managed-props`, `@made-people/grease-ui-events`, `js-cookie`, `react`, `react-dom`, `zod`.
+1. **One provider wraps everything.** `GreaseGrowthbookProvider` composes the GrowthBook React provider, an active-features store, a viewed-experiments context, and a `ManagedPropsProvider`.
+2. **Hydrate synchronously.** Build the client with `initSync({ payload })` so SSR and first client render agree.
+3. **The provider lives in `root.tsx`, not `bootstrap.tsx`.** Miss Mary and Stronger each mount a thin client-specific wrapper around it.
+4. **Flags can feed managed props.** Names shaped `ComponentName::nested_prop` become prop overrides for components registered with `withManagedProps`.
 
-## Install
+## 1. Install
 
 ```bash
 bun add @made-people/grease-growthbook
 ```
 
-## Configure the client
+Peers required: `@growthbook/growthbook ~1.6.1`, `@growthbook/growthbook-react ~1.6.1`, `@made-people/grease-event-emitter ~0.4.1`, `@made-people/grease-ui-events ~0.4.1`, `@made-people/managed-props ~1.8.1`, `@made-people/react-prop-guard ~1.6.1`, `@made-people/typeguards-common ~1.1.1`, `js-cookie ~3.0.5`, `react 18.2.0`, `react-dom 18.2.0`, `zod ^3.22.4`.
 
-Instantiate a `GrowthBook` client and hydrate it synchronously with the server payload — keeps flags stable between SSR and first client render.
+The package itself is pinned at `~0.6.2` in both clients.
+
+## 2. Build the client
+
+Instantiate once, hydrate with the server payload, and keep streaming on the browser.
 
 ```tsx
-import { GrowthBook } from "@growthbook/growthbook";
-
 const client = new GrowthBook({
   apiHost: "https://cdn.growthbook.io",
   clientKey: growthbookConfig.clientKey,
@@ -34,88 +37,123 @@ const client = new GrowthBook({
     window.dataLayer = window.dataLayer ?? [];
     window.dataLayer.push({
       event: "growthbookExperimentViewed",
-      growthbook: { experimentId: experiment.key, variationId: result.key },
+      experiment_id: experiment.key,
+      variation_id: result.key,
+      gbuuid: Cookies.get("gbuuid"),
     });
   },
-}).initSync({
-  payload: gbState.p,
-  streaming: typeof window !== "undefined",
-});
+}).initSync({ payload: gbState.p, streaming: typeof window !== "undefined" });
 ```
 
-## Wire up the provider
+The payload is flat — `experiment_id`, `variation_id`, and the `gbuuid` cookie sit alongside `event` on the dataLayer push, not nested under a `growthbook` key.
 
-`GreaseGrowthbookProvider` composes the GrowthBook React provider, an active-features store, a viewed-experiments context, and a `ManagedPropsProvider`. Mount it above anything that reads flags.
+> **The package exports no `gbState` decoder and no default `trackingCallback`.** Each client re-implements msgpack + base64 + zod decoding and its own GTM push.
+
+## 3. Mount the provider
 
 ```tsx
-import { GreaseGrowthbookProvider } from "@made-people/grease-growthbook";
-
 <GreaseGrowthbookProvider
   clientProviderProps={{ client, viewedExperiments: gbState.e }}
   managedProps={{ fallbackProps: defaultProps }}
   deferredComponentNames={["HeroBlock"]}
 >
   {children}
-</GreaseGrowthbookProvider>;
+</GreaseGrowthbookProvider>
 ```
 
-If you omit `client`, pass `clientProviderProps.payload` instead — the provider throws `"GreaseGrowthbookClientProvider: You must provide either a client or payload"` otherwise.
+Pass either `client` or `clientProviderProps.payload`. Omitting both throws `"GreaseGrowthbookClientProvider: You must provide either a client or payload"`.
 
-## Use a feature flag (hook)
+The wrapper lives in each client:
 
-```tsx
-import { useGreaseGrowthbookFeatureValue } from "@made-people/grease-growthbook";
-
-function PaypalSlot() {
-  const show = useGreaseGrowthbookFeatureValue("paypal-below-kco", false);
-  return show ? <PaypalButton /> : null;
-}
+```
+client-frontends/
+  miss-mary/app/services/growthbook/mm-growthbook-provider.tsx
+  stronger/app/services/growthbook/stronger-growthbook-provider.tsx
 ```
 
-The hook wraps `useFeatureValue` and returns `undefined` if the provider is missing, so it is safe in shared components.
+Both are mounted in `root.tsx`, not in `bootstrap.tsx`.
 
-## Run an experiment (hook)
+A few props worth knowing but easy to miss:
 
-Wrap a variation with `GreaseGrowthbookExperimentContainer` — it reads viewed experiments from context and renders children only for the matching variation.
+- **`clientProviderProps.clientOptions`** — spread into the constructed `GrowthBook` in the no-client branch. This is how you pass `clientKey`, `apiHost`, `enableDevMode`, etc. when you rely on the provider to build the client.
+- **`clientProviderProps.activeFeatures`** — pre-seeded SSR feature list so `useGreaseGrowthbookActiveFeatures()` has data on first render.
+- **`forceDisplay`** on `GreaseGrowthbookExperimentContainer` — renders children regardless of the active variation, handy for previews and Storybook.
+
+## 4. Read a flag
 
 ```tsx
-import { GreaseGrowthbookExperimentContainer } from "@made-people/grease-growthbook";
+const show = useGreaseGrowthbookFeatureValue("example-pdp-hero-variant", false);
+return show ? <HeroVariant /> : null;
+```
 
+The wrapper returns `undefined` if the provider is missing, so it is safe in shared components. `useFeatureValue` from `@growthbook/growthbook-react` throws in that case.
+
+## 5. Render an experiment variation
+
+```tsx
 <GreaseGrowthbookExperimentContainer experimentId="hero-copy" variationId="v2">
   <HeroV2 />
-</GreaseGrowthbookExperimentContainer>;
+</GreaseGrowthbookExperimentContainer>
 ```
 
-Call `useGreaseGrowthbookViewedExperiments()` to read the full `experimentId -> variationId` map.
+Use `useGreaseGrowthbookViewedExperiments()` for the full `experimentId -> variationId` map.
+
+## Public surface at a glance
+
+| Export | Purpose |
+|---|---|
+| `GreaseGrowthbookProvider` | Root composition — mount once |
+| `GreaseGrowthbookClientProvider` | Lower-level client-only provider |
+| `GreaseGrowthbookExperimentContainer` | Renders children for a given variation |
+| `useGreaseGrowthbook()` | The raw client, or `undefined` |
+| `useGreaseGrowthbookFeatureValue(id, fallback)` | Safe feature read |
+| `useGreaseGrowthbookActiveFeatures()` | `{ featureId, value }[]` currently active |
+| `useGreaseGrowthbookViewedExperiments()` | `Record<experimentId, variationId>` |
+| `greaseGrowthbookEventEmitter` | Exported but currently unused — do not rely on it for attribute updates |
+| `getGrowthbookFeaturesFromClient(client)` | Utility |
+| `resolveGrowthbookManagedProps(features, opts)` | Utility |
 
 ## User attributes
 
-Three sources feed `GrowthBook.setAttributes`:
+How attributes get onto the client depends on whether you pass a pre-built `client` or only a `payload`.
 
-1. `clientProviderProps.attributes` — literal passthrough.
-2. The browser cookie `gbuuid` (override via `clientProviderProps.cookieName`) — written to `attributes.id` on mount.
-3. Route changes — the provider subscribes to `uiEventEmitter.on("routeChanged")` from `@made-people/grease-ui-events` and calls `client.setURL(url)` plus `client.setAttributes({ ...current, url, urlPathname })`.
+**In production (Stronger and Miss Mary both pass `client`):**
 
-Observe updates downstream via `greaseGrowthbookEventEmitter.on("attributesUpdated", ...)`.
+The client is constructed in the client wrapper with whatever attributes you want — typically `id` seeded from the `gbuuid` cookie, plus any profile fields. The in-package cookie branch is skipped. On `uiEventEmitter.on("routeChanged")` from `@made-people/grease-ui-events`, `GreaseGrowthbookClientProvider` calls `client.setURL(url)` plus `client.setAttributes({ ...current, url, urlPathname })` to keep URL-based targeting fresh.
+
+**In the no-client branch (provider builds the client from `payload`):**
+
+The provider reads the `gbuuid` cookie (name configurable via `cookieName`) and writes it to `attributes.id` — **overriding any `id` in `clientProviderProps.attributes`**. Other attribute fields pass through. The `routeChanged` listener still updates `url` / `urlPathname` the same way.
+
+If you need SSR targeting by user id, prefer the pre-built-client path and warm the cookie upstream, because the in-package cookie branch is browser-only.
+
+## Managed-props flags
+
+Flags named `ComponentName::nested_prop_path` are exploded into overrides for components registered with `withManagedProps("ComponentName")`. `Foo::bar_baz` becomes `{ bar: { baz: value } }` applied as `deferredOverrideProps`. Delimiters default to `::` and `_`; override via `componentNameDelimiter` and `propDelimiter` on the provider.
+
+`deferredComponentNames` holds render on those components until the client has loaded — the recipe for avoiding flicker on first paint.
 
 ## Gotchas
 
-- `gbuuid` is only read browser-side, so SSR cannot target by `attributes.id`. Warm the cookie upstream or pass an explicit `attributes.id`.
-- `deferredComponentNames` only defers components registered with `withManagedProps`; otherwise it is a no-op.
-- Flags named `ComponentName::nested_prop_path` are exploded into managed-props overrides via `::` and `_` delimiters (both configurable).
-- Hooks from `@growthbook/growthbook-react` throw outside the provider; prefer the `useGrease*` wrappers.
-- The package does not export a `gbState` decoder or a default `trackingCallback`.
-
-## Related packages
-
-- `@growthbook/growthbook`, `@growthbook/growthbook-react` — underlying SDK.
-- `@made-people/managed-props` — powers `withManagedProps` and receives resolved overrides.
-- `@made-people/grease-ui-events` — supplies the `routeChanged` event that syncs URL attributes.
-- `@made-people/grease-event-emitter` — emitter used for `attributesUpdated`.
+- **`bootstrap.tsx` surveys are misleading.** The provider is in `root.tsx` via a client-specific wrapper.
+- **`gbuuid` is browser-only.** SSR cannot target by `attributes.id` — warm the cookie upstream or pass an explicit id.
+- **`deferredComponentNames` without `withManagedProps`** is a no-op.
+- **Raw `useFeatureValue` throws outside the provider.** Prefer the `useGrease*` wrappers in shared code.
+- **`initSync` is the supported path.** `init()` works but blocks renders.
 
 ## Troubleshooting
 
-- **Provider throws on mount:** pass either `client` or `payload`.
-- **Flags flicker on first paint:** add the component to `deferredComponentNames` and register it with `withManagedProps`, or hydrate via `initSync({ payload })`.
-- **SSR and client disagree on a flag:** `gbuuid` is unset during SSR — warm it upstream or pass an explicit `attributes.id`.
-- **`useFeatureValue` throws:** the component rendered outside the provider. Use `useGreaseGrowthbookFeatureValue` for a safe fallback.
+**Provider throws on mount** — pass either `client` or `payload` to `clientProviderProps`.
+
+**Flags flicker on first paint** — add the component to `deferredComponentNames` and register it with `withManagedProps`, or hydrate via `initSync({ payload })`.
+
+**SSR and client disagree on a flag** — `gbuuid` is unset during SSR. Warm it upstream or pass an explicit `attributes.id`.
+
+## Related packages
+
+- `@growthbook/growthbook`, `@growthbook/growthbook-react` — underlying SDK
+- `@made-people/managed-props` — powers `withManagedProps` and receives resolved overrides
+- `@made-people/grease-ui-events` — supplies `routeChanged` for URL attribute sync
+- `@made-people/nestjs-bff-service` — supplies `GrowthbookConfiguration`
+
+**Next:** [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [Cart](./cart) · [Checkout](./checkout) · [Product](./product)

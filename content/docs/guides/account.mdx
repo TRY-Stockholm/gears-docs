@@ -3,27 +3,44 @@ title: Implementing Account & Orders
 description: Wire up grease-account and grease-order for login, session, profile, address book, and order history in a client frontend
 ---
 
-## What this guide covers
+## What you'll learn
 
-How to mount `@made-people/grease-account` (v0.16.6) and `@made-people/grease-order` (v0.10.11) in a React client frontend for login, session restore, profile edits, address book, and order history. `grease-voyado-engage` plugs into the same seam through `VoyadoEngageCentraAccountDriver`, which wraps a Centra driver to add soft identification and member subscription.
+How to mount `@made-people/grease-account` (v0.16.6) and `@made-people/grease-order` (v0.10.11) in a React client frontend. Login, session restore, profile edits, address book, order history, and the Voyado Engage wrapper that layers on top.
 
-Naming quirk: `grease-order` is a **types + event-emitter** package — there is no `OrderProvider`. Orders live on `AccountState` and are fetched via a `grease-account` hook.
+## The five things to know
 
-## Prerequisites
+Before you wire anything, these five facts decide the shape of your code:
 
-- A React client frontend with a working commerce backend driver (typically `CentraAccountClient` from `@made-people/grease-centra`). See [Implementing Centra](/docs/guides/centra).
+1. **`grease-order` ships no Provider.** It is a types + event-emitter package. Orders live on `AccountState.orders` inside `AccountProvider`. Wiring `<OrderProvider />` will fail — it doesn't exist.
+2. **Read account state via `useAccountState`, not `useCustomer`.** There is no `useCustomer` hook. `useAccountState()` returns `{ customer, orders }`.
+3. **`customer` is tri-state.** `undefined` = not fetched yet. `null` = fetched, no session. A `Customer` object = logged in. Distinguish all three or you'll redirect logged-in users during hydration.
+4. **The driver is the integration seam.** `AccountClientDriver` has eight methods. Clients build `CentraAccountClient` from `@made-people/grease-centra`, then optionally wrap it with `VoyadoEngageCentraAccountDriver`.
+5. **Reset-password tokens come from the URL.** `?id=…&i=…` are read by the Centra driver's constructor, not by the hook.
+
+## 1. Prerequisites
+
+- A working commerce driver (typically `CentraAccountClient` from `@made-people/grease-centra`). See [Implementing Centra](/docs/guides/centra).
 - [Anatomy of a gears client](/docs/guides/anatomy-of-a-gears-client) for where provider trees live.
-- Peer deps installed: `react@18.2.0`, `@made-people/grease-order@~0.10.11`, `@made-people/grease-product@~1.29.0`, `@made-people/types-e164-phone-number-string@~1.2.1`, plus `zod` for `grease-order`.
+- Peer deps for `grease-account`: `react@18.2.0`, `react-dom@18.2.0`, `@made-people/grease-order@~0.10.11`, `@made-people/grease-product@~1.29.0`, `@made-people/types-e164-phone-number-string@~1.2.1`.
+- Peer deps for `grease-order`: `react@18.2.0`, `react-dom@18.2.0`, `@made-people/managed-props@~1.8.1`, `@made-people/react-prop-guard@~1.6.1`, `zod@^3.22.4`.
 
-## Install
+Install:
 
 ```bash
 bun add @made-people/grease-account @made-people/grease-order
 ```
 
-## Wire up the providers
+## 2. The provider tree
 
-One provider — `<AccountProvider />` — stores both customer and orders. From `client-frontends/stronger/app/project/bootstrap.tsx`:
+One provider — `<AccountProvider />` — stores both customer and orders. The tree looks like this:
+
+```
+AccountProvider                         ← holds customer + orders state
+  └─ AccountInitialize                  ← internal; calls fetchCustomer on mount
+      └─ children (routes, blueprints)
+```
+
+From `client-frontends/stronger/app/project/bootstrap.tsx`:
 
 ```tsx
 import { AccountProvider, AccountProviderProps } from "@made-people/grease-account";
@@ -31,16 +48,17 @@ import { AccountProvider, AccountProviderProps } from "@made-people/grease-accou
 const accountProviderProps: AccountProviderProps = {
   accountClientDriver: voyadoEngageCentraAccountClient,
 };
-
 // …
 <AccountProvider {...accountProviderProps}>{children}</AccountProvider>;
 ```
 
-`AccountProvider` mounts an internal `<AccountInitialize />` that calls `fetchCustomer` on mount to restore the session. Disable with `disableFetchOnMount` or `initializeOnMount={false}` to defer.
+`AccountProvider` mounts an internal `<AccountInitialize />` that calls `fetchCustomer` on mount to restore the session. Defer with `disableFetchOnMount` or `initializeOnMount={false}`.
 
-## Driver pattern
+> **Orders ride along inside `AccountProvider`.** There is no separate `OrderProvider`. If you need orders, call `useAccountFetchOrders` — don't reach for a provider that doesn't exist.
 
-`AccountClientDriver` is the integration seam. It has eight methods: `login`, `logout`, `register`, `fetchCustomer`, `fetchOrders`, `resetPassword`, `sendResetPasswordEmail`, `updateCustomer`. Build the driver bottom-up from Centra, then wrap with Voyado if needed:
+## 3. The driver pattern
+
+Build bottom-up: Centra first, then wrap with Voyado if you use Engage.
 
 ```tsx
 import {
@@ -51,10 +69,7 @@ import {
 import { VoyadoEngageCentraAccountDriver } from "@made-people/grease-voyado-engage";
 
 const mappers: CentraAccountMappers = {
-  orderMapper: makeCentraCheckoutApiOrderToGreaseOrderMapper(
-    getCentraMapperOptions(frontendContext),
-    strongerCentraMappers,
-  ),
+  orderMapper: makeCentraCheckoutApiOrderToGreaseOrderMapper(/* … */),
   customerMapper: centraCheckoutApiCustomerToGreaseCustomer,
 };
 const centraAccountClient = new CentraAccountClient(
@@ -64,57 +79,70 @@ const centraAccountClient = new CentraAccountClient(
 const voyadoEngageCentraAccountClient = new VoyadoEngageCentraAccountDriver({
   voyadoEngageClient, centraAccountClient,
   discoveryKeySetter: { setDiscoveryKey: setVoyadoCustomerKey },
-  // … subscribeOptions
 });
 ```
 
-Pass the wrapped client as `accountClientDriver` so Voyado can intercept login/register. Skip the wrap if you don't use Engage.
+Pass the wrapped client as `accountClientDriver`. Skip the Voyado wrap if you don't use Engage.
 
-## Authentication
+## 4. Hooks grouped by purpose
 
-All auth hooks return a `useRequester` shape (`{ execute, ... }`). Real signatures:
+Every `grease-account` hook returns a `useRequester`-style shape (`{ execute, … }`).
 
-```tsx
-const login = useAccountLogin();
-await login.execute({ email, password, method: "email" });
-// → { success: true } | { success: false, error: "Account_InvalidCredentials" | "Account_MissingFields" | "Account_InvalidEmail" | "Account_UnknownError" }
+### Auth
 
-const logout = useAccountLogout();
-await logout.execute(); // clears AccountState
+| Hook | Purpose |
+|---|---|
+| `useAccountLogin` | Email/password login, returns a discriminated union: `{ success: true }` or `{ success: false, error }` where `error` is `"Account_MissingFields" \| "Account_InvalidEmail" \| "Account_InvalidCredentials" \| "Account_UnknownError"` |
+| `useAccountLogout` | Clears `AccountState` |
+| `useAccountRegister` | Register a new customer |
+| `useAccountSendResetPasswordEmail` | Triggers the reset email |
+| `useAccountResetPassword` | Consumes `?id` + `?i` from URL |
 
-const sendEmail = useAccountSendResetPasswordEmail();
-await sendEmail.execute({ email });
-const reset = useAccountResetPassword();
-await reset.execute({ newPassword }); // driver reads ?id & ?i from URL
-```
+### Session / profile
 
-## Session / customer state
+| Hook | Purpose |
+|---|---|
+| `useAccountState` | Reads `{ customer, orders }` from context |
+| `useAccountFetchCustomer` | Manual session refresh |
+| `useAccountUpdateCustomer` | Writes profile + address book |
 
-`useAccountState()` returns `{ customer, orders }`. Read `customer` as a tri-state:
+### Orders
+
+| Hook | Purpose |
+|---|---|
+| `useAccountFetchOrders` | Lazy; call `.execute()` in an effect |
+
+### Lower-level
+
+| Hook | Purpose |
+|---|---|
+| `useAccountClient` | Raw driver access |
+| `useAccountDispatch` | Dispatch reducer actions directly. `AccountActionTypes` exposes `SET_ACCOUNT_DATA`, `SET_ORDERS`, and `CLEAR_ACCOUNT_DATA` |
+| `useAccountEventEmitter` | Subscribe to `loginSuccess`/`loginFailure`/`registerSuccess`/`registerFailure`. Each payload is `{ additionalData?, method }` — `method` is required (e.g. `"email"`, `"google"`) |
+
+> **Tip: enriching event payloads.** Wrap your tree in `<AccountEventAdditionalDataProvider additionalData={…} method="email">` (from `account-event-additional-data-provider.tsx`) and `useAccountLogin` / `useAccountRegister` will pull that context in automatically when they emit `loginSuccess` / `registerSuccess` etc.
+
+## 5. Session state as tri-state
 
 ```tsx
 const { customer } = useAccountState();
-if (customer === undefined) return null;        // not fetched yet
-if (customer === null) navigate("/account/login"); // fetched, no session
+if (customer === undefined) return null;              // not fetched yet
+if (customer === null) navigate("/account/login");    // fetched, no session
 // else: Customer is logged in
 ```
 
-This is the pattern used in `client-frontends/stronger/app/gears/routes/account/account-index-page-route.tsx`.
+Same pattern in `client-frontends/stronger/app/gears/routes/account/account-index-page-route.tsx`.
 
-## Profile & address book
+## 6. Profile, address book, and orders
 
-`Customer` (from `@made-people/grease-customer`) carries `firstName`, `lastName`, `email`, `addresses[]`, and `attributes`. Update with `useAccountUpdateCustomer`:
+`Customer` (from `@made-people/grease-customer`) carries `firstName`, `lastName`, `email`, `addresses[]`, and `attributes`. The address book is just the array — mutate it and push the whole customer back:
 
 ```tsx
 const update = useAccountUpdateCustomer();
 await update.execute({ customer: { ...customer, firstName: "Ada" } });
 ```
 
-The address book is just `customer.addresses` — mutate the array and push the whole customer back through `updateCustomer`.
-
-## Order history
-
-Orders live on `AccountState.orders`. Fetch lazily after the account page mounts:
+Orders are lazy. Fetch inside an effect:
 
 ```tsx
 const orders = useAccountFetchOrders();
@@ -122,44 +150,64 @@ useEffect(() => { orders.execute(); }, []);
 const { orders: orderList } = useAccountState();
 ```
 
-Each `Order` (zod-validated from `grease-order`) has `orderNumber`, `currencyCode`, `itemQuantity`, `items[]`, `totals`, `status` (`pending | processing | completed | cancelled | refunded`), `date`, `paymentMethod`, `shippingMethod`, `shippingAddress`, `billingAddress`, and optional `vouchers` / `customer`.
+Each zod-validated `Order` from `grease-order` carries `orderNumber`, `currencyCode`, `itemQuantity`, `items[]`, `totals`, `status` (`pending | processing | completed | cancelled | refunded`), `date`, `paymentMethod`, `shippingMethod`, `shippingAddress`, `billingAddress`, and `vouchers[]` (required — empty array when none). Only `additionalNotes` and `customer` are optional.
 
-## Customer / order mappers
+## 7. Customer / order mappers
 
-Backend responses (e.g. Centra's `CentraLoggedIn`) must be mapped into grease shapes before they hit the reducer. `grease-centra` ships a default customer mapper — excerpt:
+Backend responses (e.g. Centra's `CentraLoggedIn`) must be mapped into grease shapes before they reach the reducer. `grease-centra` ships a default customer mapper:
 
 ```ts
-// src/frontend/grease/centra/src/utils/mappers/checkout-api/selection/
-// centra-checkout-api-customer-to-grease-customer.ts
+// grease-centra: centra-checkout-api-customer-to-grease-customer.ts
 export const centraCheckoutApiCustomerToGreaseCustomer = (
   loggedIn: CentraLoggedIn,
 ): Customer => ({
   id: loggedIn.customer,
-  firstName: loggedIn.firstName, lastName: loggedIn.lastName,
+  firstName: loggedIn.firstName,
+  lastName: loggedIn.lastName,
   email: loggedIn.email,
-  addresses: [{ /* … single address from loggedIn fields */ }],
+  addresses: [
+    {
+      firstName: loggedIn.firstName,
+      lastName: loggedIn.lastName,
+      street: loggedIn.address1,
+      street2: loggedIn.address2,
+      city: loggedIn.city,
+      state: loggedIn.state,
+      zipCode: loggedIn.zipCode,
+      country: loggedIn.country,
+      phoneNumber: loggedIn.phoneNumber,
+    },
+  ],
   attributes: {},
 });
 ```
 
-Clients compose mappers inline in bootstrap (see stronger's `strongerCentraMappers`); there is no separate `customer-mapper.ts` convention.
+Note the shape: `id`, `firstName`, `lastName`, and `email` live on the top-level customer. The address sub-object carries its own name, phone, and street/city/zip/country — but **no** `email` field.
+
+Clients compose mappers inline in `bootstrap.tsx` (see stronger's `strongerCentraMappers`). There is no separate `customer-mapper.ts` convention.
 
 ## Gotchas
 
-- `customer === undefined` vs `null` — always distinguish before redirecting, or you'll bounce logged-in users during hydration.
-- `grease-order` has no provider. Wiring `<OrderProvider />` will fail: it doesn't exist.
-- If SSR the guard `if (customer === undefined) return null` is critical — `AccountInitialize` only fires client-side.
-- `VoyadoEngageCentraAccountDriver` wraps `CentraAccountClient`; swapping the inner driver later won't propagate unless you rebuild the wrapper.
-- Reset-password needs the URL query params `?id=…&i=…` — wire them into the `CentraAccountClient` constructor `resetPasswordData`, not into the hook.
-
-## Related packages
-
-- `@made-people/grease-voyado-engage` — provides `VoyadoEngageCentraAccountDriver` and emits `loginSuccess` events to Engage tracking.
-- `@made-people/grease-checkout` — reads the logged-in customer from `useAccountState` to pre-fill shipping/billing forms.
-- `@made-people/blueprint-account` — UI primitives (`AccountLogin`, `AccountOrders`, `ResetPassword`, …) that consume these hooks.
+- **`customer === undefined` vs `null`.** Always distinguish before redirecting, or you'll bounce logged-in users during hydration.
+- **`grease-order` has no provider.** Wiring `<OrderProvider />` will fail: it doesn't exist.
+- **SSR hydration guard.** `AccountInitialize` only fires client-side. The `undefined` check is critical during SSR.
+- **Rewrapping the driver.** `VoyadoEngageCentraAccountDriver` wraps `CentraAccountClient`. Swapping the inner driver later won't propagate unless you rebuild the wrapper.
+- **Reset-password tokens.** `?id=…&i=…` go into the `CentraAccountClient` constructor's `resetPasswordData`, not into the hook.
+- **Login succeeds but state stays empty.** You called the driver directly. Only `useAccountLogin` dispatches `SET_ACCOUNT_DATA`.
 
 ## Troubleshooting
 
-- **Users logged in but orders never appear:** `useAccountFetchOrders` is lazy; call `.execute()` inside an effect.
-- **Login succeeds but state never updates:** you used the driver directly instead of `useAccountLogin` — only the hook dispatches `SET_ACCOUNT_DATA`.
-- **Reset-password flow silently fails:** `id` / `i` aren't being passed into `CentraAccountClient`'s `resetPasswordData`, so the driver has no token to send.
+**Users logged in but orders never appear** — `useAccountFetchOrders` is lazy. Call `.execute()` inside an effect.
+
+**Login succeeds but state never updates** — you bypassed the hook. Use `useAccountLogin`, not the driver directly.
+
+**Reset-password flow silently fails** — `id` / `i` aren't reaching `CentraAccountClient`'s `resetPasswordData`. The driver has no token to send.
+
+## Related packages
+
+- `@made-people/grease-voyado-engage` — provides `VoyadoEngageCentraAccountDriver` and emits `loginSuccess` to Engage tracking.
+- `@made-people/grease-checkout` — reads the logged-in customer from `useAccountState` to pre-fill forms.
+- `@made-people/blueprint-account` — UI primitives (`AccountLogin`, `AccountOrders`, `ResetPassword`, …) that consume these hooks.
+- `@made-people/grease-centra` — `CentraAccountClient`, `CentraAccountMappers`, default customer/order mappers.
+
+**Next:** [Cart](./cart) · [Checkout](./checkout) · [Product](./product) · [Anatomy of a Gears client](./anatomy-of-a-gears-client) · [Voyado Engage](./implementing-voyado-engage)

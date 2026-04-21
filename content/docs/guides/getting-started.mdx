@@ -1,0 +1,186 @@
+---
+title: Getting Started
+description: Set up the Gears monorepo from scratch — Node, Rush, dependencies, common commands, dev servers, and the workflow for shipping changes
+---
+
+## What you'll learn
+
+How to get the Gears monorepo running on a fresh machine, how to build and test individual packages, how to start a client dev server, and the commit + changelog workflow for opening a merge request.
+
+## 1. Prerequisites
+
+You need four things before you clone:
+
+| Tool | Why | How |
+|---|---|---|
+| **Node.js** (version pinned in `.nvmrc`) | Every package targets the same Node | `brew install nvm`, then `nvm use` in the repo |
+| **Rush** | Orchestrates the monorepo | `npm install -g @microsoft/rush` |
+| **pnpm** | Package manager used by Rush | Rush installs the right version automatically |
+| **Git** | Hooks are registered by `rush update` | Should already be on your machine |
+
+> **Use `nvm use` the first time you `cd` into the repo.** Rush will refuse to run if your Node version doesn't match `.nvmrc`.
+
+## 2. Clone and install
+
+```bash
+git clone <monorepo-url>
+cd npm-monorepo
+nvm use
+rush update
+```
+
+`rush update` is the key command. It:
+
+- Installs every package's dependencies into a shared `pnpm-store`
+- Symlinks packages to each other (so `@made-people/grease-cart` in Stronger points at your local source)
+- Registers git hooks (Prettier runs on commit)
+
+**Rerun `rush update` after any `package.json` change** — yours or someone else's that you pulled. If you see "package not found" after a pull, that's almost always the fix.
+
+## 3. Core commands
+
+Run these from the repo root:
+
+| Command | What it does |
+|---|---|
+| `rush build` | Incremental build (only packages that changed) |
+| `rush rebuild` | Full clean rebuild |
+| `rush test` | Run tests across every package |
+| `rush prettier` | Check formatting |
+| `rush prettier-fix` | Fix formatting |
+| `rush eslint` | Lint across packages |
+| `rush build:watch` | Incremental watch mode |
+| `rush change` | Create a changelog entry (required for every MR) |
+| `rush change --bulk` | One changelog entry covering multiple packages |
+
+## 4. Building one package (not the whole tree)
+
+When you're working on a specific library, **don't use `rush build --to <package>`.** It's slow and often builds more than you need. Instead:
+
+```bash
+cd src/frontend/blueprint/product-list
+npm run build
+```
+
+Client frontends (`miss-mary`, `stronger`, `dedicated`) **don't need to be built during development** — their dev servers do live compilation. Only build library packages you're actively editing.
+
+## 5. Dev servers
+
+Pick the target that matches what you're working on:
+
+| Command | What it runs |
+|---|---|
+| `rush storybook` | React Storybook for blueprint/grease UI components |
+| `rush remix-demo-site` | Remix demo site with BFF proxy |
+| `rush stronger` | Stronger client frontend |
+| `rush miss-mary` | Miss Mary client frontend |
+| `rush dedicated` | Dedicated client frontend |
+
+All dev servers hot-reload. If a change to a grease package isn't picked up, make sure you built that package (`cd` into it and `npm run build`) — the dev server reads the built output, not the source.
+
+## 6. Testing
+
+Two workflows depending on scope:
+
+**Test one package:**
+```bash
+rush test --to <package-name>
+```
+
+**Test everything in parallel:**
+```bash
+./bin/run-tests-in-parallel/run-tests-in-parallel.sh
+```
+
+Per-job logs land in `./tmp/logs/$jobNumber.log`. Open them when something fails; the parallel runner only shows summaries.
+
+## 7. The merge-request workflow
+
+Every MR needs a changelog entry. Rush will reject the merge without one.
+
+```bash
+# 1. Make your changes, commit normally
+git add .
+git commit -m "fix: voucher calculation off by one"
+
+# 2. Before pushing, create the changelog entry
+rush change
+
+# 3. Rush prompts for a message + bump type for each changed package
+# → commit the generated common/changes/*.json file
+git add common/changes
+git commit -m "chore: changelog"
+
+# 4. Push and open the MR
+git push
+```
+
+Use `rush change --bulk` if your MR touches many packages and a single message covers them all.
+
+## 8. Repo layout
+
+The directories you'll touch most:
+
+| Path | What lives there | Prefix |
+|---|---|---|
+| `src/frontend/grease/` | React packages: API clients, state, flows | `grease-` |
+| `src/frontend/blueprint/` | Reusable UI React components | `blueprint-` |
+| `src/frontend/lib/` | Frontend libraries (non-React) | — |
+| `src/lib/` | Shared libraries (types, utilities, API clients) | — |
+| `src/services/nestjs/` | NestJS microservices + PubSub handlers | `nestjs-` |
+| `src/other/` | Tools, configs | — |
+| `src/legacy/` | Legacy Nuxt/Express/Gears v1 | — |
+| `client-frontends/` | Production clients (miss-mary, stronger, dedicated) | — |
+| `development-utilities/` | Storybook, express dev servers | — |
+
+Published packages use the `@made-people/` scope. Package names should make sense outside the monorepo — e.g. `grease-cart` not `cart`.
+
+## 9. VS Code setup
+
+Open the generated workspace file, not the folder directly:
+
+```bash
+code npm-monorepo.code-workspace
+```
+
+This gives each package its own root so TypeScript, ESLint, and file search stay fast. Regenerate the workspace when new packages are added (command in the repo README).
+
+## Clients
+
+The three production storefronts in this monorepo:
+
+- **Dedicated** — [dedicatedbrand.com](https://www.dedicatedbrand.com/)
+- **Miss Mary** — [missmary.com](https://www.missmary.com/)
+- **Stronger** — [strongerlabel.com](https://www.strongerlabel.com/)
+
+## Gotchas
+
+- **Skipped `rush update` after pulling.** Dependencies drift, builds fail with "module not found". Fix: `rush update`.
+- **Used `rush build --to` on a big package.** Slow, builds too much. Fix: `cd` into the package and `npm run build`.
+- **Forgot `rush change` before MR.** CI rejects the branch. Fix: run `rush change`, commit, push.
+- **Wrong Node version.** Rush refuses to run. Fix: `nvm use`.
+- **Dev server shows stale component.** Library wasn't rebuilt. Fix: `cd <package> && npm run build`.
+- **Opened the folder in VS Code instead of the workspace.** TypeScript language server thrashes. Fix: open `npm-monorepo.code-workspace`.
+
+## Code-style rules to know up front
+
+- **Prettier is enforced via git hooks.** `rush update` registers them. Don't commit unformatted code.
+- **No `any` in TypeScript.** Fix the underlying types instead.
+- **No code comments unless the WHY is non-obvious.** Well-named identifiers carry the intent.
+- **Use Tailwind tokens** from `tailwind-theme.ts`, not hard-coded values like `bg-[#f4f4f5]`.
+- **Use relative import paths in `client-frontends/`**, not the `~` alias.
+
+## Troubleshooting
+
+**"rush update" fails with peer-dep warnings** — usually benign, but if install exits non-zero, check that your Node version matches `.nvmrc` and that Rush itself is up to date (`npm i -g @microsoft/rush`).
+
+**"Module not found" after switching branches** — `rush update` and rebuild the affected package.
+
+**"Cannot find module '@made-people/...'" in a dev server** — the library wasn't built. `cd` into it and `npm run build`.
+
+**Hook errors on commit** — Prettier failed. Run `rush prettier-fix`, re-stage, commit again.
+
+## Next
+
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — bootstrap provider stacking and routing conventions
+- [Implementing Cart](./cart) · [Checkout](./checkout) · [Product](./product) · [Account & Orders](./account)

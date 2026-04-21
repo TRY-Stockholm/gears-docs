@@ -3,28 +3,38 @@ title: Implementing Algolia
 description: Wire up Algolia search in a client frontend for instant product search, filters, and suggestions
 ---
 
-## What this guide covers
+## What you'll learn
 
-How to mount `@made-people/grease-algolia` in a React client frontend for instant product search, autocomplete, faceted filters, Algolia Recommend, and automatic Algolia Insights events from product, cart, and order activity.
+How to mount `@made-people/grease-algolia` so a client gets instant search, autocomplete, faceted filters, Algolia Recommend, and automatic Insights events.
 
-## Prerequisites
+## The four things to know
 
-- React client frontend importing `@made-people/grease-algolia`
-- `@made-people/grease-search` mounted (`<SearchProvider>`) — owns search state, facets, autocomplete
-- Algolia application ID, search-only API key, and index name — resolved via `useGearsServiceUrl("algolia")` (e.g. `/algolia/v2/context/products?market=…&language=…`)
-- `grease-product`, `grease-cart`, `grease-order` — emitters feed Insights
+1. **`AlgoliaProvider` sits inside `SearchProvider`.** `grease-search` owns search state, facets, and autocomplete. `grease-algolia` plugs its clients into that shell.
+2. **Credentials are fetched, not hard-coded.** An async `algoliaClientDataGetter` resolves `{ application_id, search_api_key, index_name }` from the gears algolia service via `useGearsServiceUrl("algolia")`.
+3. **Insights mount automatically — but only with a user token.** Set `algoliaConfig.insights.userToken` and `AlgoliaNotifications` subscribes to product, cart, and order event emitters.
+4. **`AlgoliaSearchResultsProvider` only renders product searches.** Any other `algoliaTypeId` silently renders nothing.
 
-## Install
+## 1. Install
+
+Inside the Rush monorepo, add `@made-people/grease-algolia` to your app's `package.json` and run `rush update`. Outside the monorepo:
 
 ```bash
-bun add @made-people/grease-algolia
+pnpm add @made-people/grease-algolia
 ```
 
-Install the peer deps (`@made-people/grease-search`, `@made-people/grease-product`, `@made-people/managed-props`, `react`, `react-dom`, `zod`) and the Algolia SDKs: `algoliasearch`, `@algolia/client-insights`, `@algolia/recommend`.
+Peer deps: `@made-people/grease-search`, `@made-people/grease-product`, `@made-people/managed-props`, `react`, `react-dom`, `zod`. Also install the Algolia SDKs the consumer constructs: `algoliasearch`, `@algolia/client-insights`, `@algolia/recommend`.
 
-## Configure the search client
+> **Heads up — implicit deps.** `@made-people/grease-cart` and `@made-people/grease-order` are not declared peer dependencies of `grease-algolia`, but `AlgoliaNotifications` subscribes to their event emitters at runtime. Add them explicitly to your consumer app so the emitters are present.
 
-`AlgoliaProvider` takes an async `algoliaClientDataGetter` that returns the three Algolia clients plus the index name:
+> **SDK version skew.** `@algolia/client-insights` is on the v5 SDK line (`~5.45.0`) while `algoliasearch` and `@algolia/recommend` are still on v4 (`~4.20.0`). The code below uses both lines side by side — that's intentional, not a typo.
+
+> **Import path.** The search client imports from `algoliasearch/lite` (which matches the `SearchClient` type expected by the provider), not from the package root.
+
+Current package version: `1.6.7`.
+
+## 2. Build the client getter
+
+`AlgoliaProvider` takes an async `algoliaClientDataGetter` returning the three Algolia clients plus `indexName`:
 
 ```ts
 import algoliasearch from "algoliasearch/lite";
@@ -36,6 +46,7 @@ export const getAlgoliaClient = async (language, market, algoliaServiceUrl) => {
     algoliaServiceUrl,
     { market, language },
   );
+  // …
   return {
     searchClient: algoliasearch(application_id, search_api_key),
     insightsClient: insightsClient(application_id, search_api_key),
@@ -45,7 +56,11 @@ export const getAlgoliaClient = async (language, market, algoliaServiceUrl) => {
 };
 ```
 
-## Wire up the provider
+The gears endpoint looks like `/algolia/v2/context/products?market=…&language=…`. `indexName` is fetched — there is no prop to set it directly on `AlgoliaProvider`.
+
+> **No token, no Insights.** If `algoliaConfig.insights?.userToken` is unset, `AlgoliaNotifications` never mounts and zero events are sent. Generate the token before `AlgoliaProvider` renders.
+
+## 3. Wire up the provider stack
 
 ```tsx
 import {
@@ -54,29 +69,35 @@ import {
   type AlgoliaProviderProps,
 } from "@made-people/grease-algolia";
 
-const algoliaProviderProps: AlgoliaProviderProps = {
-  algoliaClientDataGetter: () =>
-    getAlgoliaClient(language, market, algoliaBaseUrl),
+const props: AlgoliaProviderProps = {
+  algoliaClientDataGetter: () => getAlgoliaClient(language, market, url),
   algoliaConfig: {
-    mappers: {
-      centraShopProduct: myCentraShopProductMapper,
-      algoliaFacetToGreaseFacetValue: myFacetValueMapper,
-      resolveFacetValueForFilter: (facetId, valueId) => valueId,
-    },
-    insights: algoliaUserToken ? { userToken: algoliaUserToken } : undefined,
+    mappers: { centraShopProduct, algoliaFacetToGreaseFacetValue },
+    insights: userToken ? { userToken } : undefined,
   },
 };
 
-<AlgoliaProvider {...algoliaProviderProps}>
+<AlgoliaProvider {...props}>
   <AlgoliaAutoCompleteProvider>{children}</AlgoliaAutoCompleteProvider>
 </AlgoliaProvider>;
 ```
 
-Mount this inside `<SearchProvider>` from `grease-search`. When `insights.userToken` is set, `AlgoliaProvider` auto-renders `AlgoliaNotifications`, which subscribes to `productEventEmitter`, `cartEventEmitter`, and `orderEventEmitter` and sends `view` / `click` / `conversion` events to Algolia Insights.
+Mount inside `<SearchProvider>` from `grease-search`. The tree:
 
-## Use it: instant search
+```
+SearchProvider                       ← from grease-search
+  └─ AlgoliaProvider                 ← clients + config
+      └─ AlgoliaAutoCompleteProvider ← plugs into grease-search AutoComplete
+          └─ children
+```
 
-`AlgoliaSearchResultsProvider` plugs into `CachedSearchResultsProvider` from `grease-search`, so downstream hooks keep working:
+Miss Mary wires this in `client-frontends/miss-mary/app/bootstrap.tsx` via a thin `<AlgoliaBootstrap>` wrapper at `client-frontends/miss-mary/app/services/algolia/algolia-bootstrap.tsx`.
+
+> **Autocomplete defaults.** `AlgoliaAutoCompleteClient` hard-codes `algoliaTypeId: "product"` and `clickAnalytics: true`. Autocomplete only queries the product index, and every autocomplete click is tracked in Insights.
+
+## 4. Render a search page
+
+`AlgoliaSearchResultsProvider` wraps `CachedSearchResultsProvider` from `grease-search`, so any downstream search hook keeps working:
 
 ```tsx
 import {
@@ -95,43 +116,51 @@ const payload: AlgoliaSearchPayload = {
 </AlgoliaSearchResultsProvider>;
 ```
 
-## Use it: autocomplete
-
-`AlgoliaAutoCompleteProvider` wraps `AutoCompleteProvider` from `grease-search` via `AlgoliaAutoCompleteClient`. Any `useAutoComplete()` consumer then gets Algolia-backed product suggestions.
-
-## Use it: recommendations
+## 5. Recommendations
 
 ```tsx
-import { AlgoliaRecommendations } from "@made-people/grease-algolia";
-
 <AlgoliaRecommendations model="related-products" maxRecommendations={8}>
   <RecommendationList />
 </AlgoliaRecommendations>;
 ```
 
-Models: `related-products`, `bought-together`, `looking-similar`, `trending-items`, `trending-facets`. `objectID` is auto-resolved from `useMaybeProductBase()` or the first cart item when omitted.
+| Model | `objectID` |
+|---|---|
+| `related-products` | auto-resolved |
+| `bought-together` | auto-resolved |
+| `looking-similar` | auto-resolved |
+| `trending-items` | not needed |
+| `trending-facets` | not needed |
+
+All four product-context models auto-resolve `objectID` from `useMaybeProductBase()` or the first cart item when you omit the prop. You only need to pass it explicitly if neither context is available (e.g. a standalone recommendations page).
 
 ## Filters and facets
 
-Facet state is owned by `grease-search`. Selections are translated via `searchResultFacetsToAlgoliaFacetFilters` and applied through `performDisjunctiveSearch`. Pass `facetGroupConfigs` on the payload for grouped facets; set `algoliaConfig.mappers.resolveFacetValueForFilter` when display IDs differ from Algolia index values (e.g. JSON-encoded color swatches).
+Facet state is owned by `grease-search`. Selections are translated via `searchResultFacetsToAlgoliaFacetFilters` and applied through `performDisjunctiveSearch`. Pass `facetGroupConfigs` on the payload for grouped facets. Set `algoliaConfig.mappers.resolveFacetValueForFilter` when display IDs differ from Algolia index values (e.g. JSON-encoded color swatches).
 
 ## Gotchas
 
-- `AlgoliaSearchResultsProvider` only renders for `algoliaTypeId === "product"` — other values silently render nothing.
-- `AlgoliaRecommendations` returns `null` when results are empty; render an empty state outside it.
-- `AlgoliaClientDataGetter` may return `undefined` if the config fetch fails; search is silently disabled.
-- Insights only fire when `algoliaConfig.insights.userToken` is set — without it `AlgoliaNotifications` never mounts.
-- Product-context Recommend models (`related-products`, `bought-together`, `looking-similar`) need an `objectID`; on non-PDP pages, only `trending-*` work.
-
-## Related packages
-
-- `@made-people/grease-search` — required peer; hosts `SearchProvider`, `CachedSearchResultsProvider`, `AutoCompleteProvider`.
-- `@made-people/grease-product`, `@made-people/grease-cart`, `@made-people/grease-order` — event emitters `AlgoliaNotifications` subscribes to.
-- `@made-people/gears-configuration` — `useGearsServiceUrl("algolia")` to resolve credentials.
+- **Wrong `algoliaTypeId`.** `AlgoliaSearchResultsProvider` silently renders nothing unless `algoliaTypeId === "product"`.
+- **Config fetch failure.** `AlgoliaClientDataGetter` may return `undefined`; search is silently disabled.
+- **Missing user token.** No `insights.userToken` means no `AlgoliaNotifications`, no Insights events.
+- **Missing `objectID` on a non-PDP page.** Only `trending-items` and `trending-facets` work without product context; the other three models rely on `useMaybeProductBase()` or the first cart item to auto-resolve `objectID`.
+- **Facet value mismatch.** Without `resolveFacetValueForFilter`, display IDs must match Algolia values exactly.
+- **Non-Centra indexes.** `mappers.centraShopProduct` expects Centra Shop API records; supply your own mapper otherwise.
 
 ## Troubleshooting
 
-- **Search returns nothing:** the `algoliaClientDataGetter` likely resolved to `undefined` (gears algolia service error). Verify the endpoint and credentials.
-- **Insights not sent:** `algoliaConfig.insights.userToken` is missing. Generate and persist a user token before rendering `AlgoliaProvider`.
-- **Recommendations render nothing:** either the model needs an `objectID` you didn't supply, or the result set is empty.
-- **Facet value mismatch:** supply `resolveFacetValueForFilter` to translate display IDs into Algolia index values.
+**Search returns nothing** — the `algoliaClientDataGetter` likely resolved to `undefined`. Verify the gears algolia endpoint and credentials.
+
+**Insights not sent** — `algoliaConfig.insights.userToken` is missing. Generate and persist a token before rendering `AlgoliaProvider`.
+
+**Recommendations render nothing** — `AlgoliaRecommendations` returns `null` both while results are still loading (`results === undefined`) and when the result set is empty. If you need a loading skeleton or an empty state, render it outside `AlgoliaRecommendations`. Also double-check that `objectID` could be auto-resolved (or pass one explicitly).
+
+**Facet value mismatch** — supply `resolveFacetValueForFilter` to translate display IDs into Algolia index values.
+
+## Related packages
+
+- `@made-people/grease-search` — required peer; hosts `SearchProvider`, `CachedSearchResultsProvider`, `AutoCompleteProvider`
+- `@made-people/grease-product`, `@made-people/grease-cart`, `@made-people/grease-order` — event emitters `AlgoliaNotifications` subscribes to
+- `@made-people/gears-configuration` — `useGearsServiceUrl("algolia")` to resolve credentials
+
+**Next:** [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [Cart](./cart) · [Product](./product) · [Checkout](./checkout)

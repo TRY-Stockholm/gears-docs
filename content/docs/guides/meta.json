@@ -1,6 +1,7 @@
 {
   "title": "Guides",
   "pages": [
+    "getting-started",
     "anatomy-of-a-gears-client",
     "---Commerce core---",
     "cart",
