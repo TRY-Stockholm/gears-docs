@@ -1,6 +1,6 @@
 ---
 title: Centra Mappers
-description: How Centra API responses become the Grease data model — the 27 default mappers, the options they read, and how each client overrides them per brand
+description: How Centra API responses become the Grease data model — the 26 default mappers, the options they read, and how each client overrides them per brand
 ---
 
 ## What you'll learn
@@ -10,7 +10,7 @@ How `@made-people/grease-centra` maps every Centra Checkout API response into th
 ## The four things to know
 
 1. **Grease hooks never see raw Centra.** Every Centra response runs through a mapper before it reaches `grease-cart`, `grease-product`, `grease-order`, or `grease-customer`. You override at the mapper layer, not the component layer.
-2. **27 default mappers ship with the package.** `defaultCentraCheckoutApiMappers` covers selection, cart, order, customer, product, bundle, voucher. You override a subset; the rest keep working.
+2. **26 default mappers ship with the package.** `defaultCentraCheckoutApiMappers` covers selection, cart, order, customer, product, bundle, voucher. You override a subset; the rest keep working.
 3. **Mappers take a second argument: `CentraCheckoutApiMapperOptions`.** Runtime context (`currencyCode`, `countryCode`) + product config (`productImageKey`, `uriField`, dimension parsing) lives here. It's the same across every mapper in a given render.
 4. **The `CentraProvider.mapperOptions` prop wires both.** Pass your overrides as `mappers` and your options as `options`. The provider merges your overrides over `defaultCentraCheckoutApiMappers` and threads `options` through every call.
 
@@ -65,7 +65,7 @@ export type CentraCheckoutApiMapperOptions = {
 
 Pick **one** of `itemDimensionParser` or `itemDimensionParseOptions` — they're mutually exclusive. Custom parser wins if both are set.
 
-## 3. The 27 default mappers
+## 3. The 26 default mappers
 
 Everything ships from `src/frontend/grease/centra/src/utils/mappers/checkout-api/default-centra-checkout-api-mappers.ts`. You import the whole object and spread your overrides on top:
 
@@ -79,7 +79,7 @@ export const strongerCentraMappers = {
 };
 ```
 
-The 27 mappers fall into five groups:
+The 26 mappers fall into five groups:
 
 **Product (10)** — the biggest surface, where most client overrides live:
 
@@ -94,7 +94,7 @@ The 27 mappers fall into five groups:
 - `centraCheckoutApiProductToGreaseItemProduct`
 - `centraCheckoutApiRelatedProductsToSiblingProducts`
 
-**Item (4)** — cart-line / PDP variant level:
+**Item (3)** — cart-line / PDP variant level:
 
 - `centraCheckoutApiItemToGreaseProductVariant`
 - `centraCheckoutApiItemToGreasePurchaseInfo`
@@ -122,7 +122,7 @@ The 27 mappers fall into five groups:
 - `centraCheckoutApiAutoVoucherToGreaseAutoVoucher`
 - `centraCheckoutApiVoucherToGreaseCodeVoucher`
 
-Each name encodes the direction: `<inputShape>To<OutputShape>`. The TypeScript type `CentraCheckoutApiMappers` (the key union) is your cheat sheet — autocomplete will show you the 27.
+Each name encodes the direction: `<inputShape>To<OutputShape>`. The TypeScript type `CentraCheckoutApiMappers` (the key union) is your cheat sheet — autocomplete will show you the 26.
 
 ## 4. Client options — three examples
 

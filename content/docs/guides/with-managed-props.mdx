@@ -148,9 +148,9 @@ The three live clients all follow this shape, with slight variations in director
 
 | Client | Per-component defaults live in | Aggregated at |
 |---|---|---|
-| Stronger | `app/project/blueprint/components/<name>/default-props.tsx` | `app/project/default-props.tsx` (170 lines, 66+ entries) |
-| Miss Mary | `app/components/blueprint/<name>/default-props.tsx` | `app/config/default-props.tsx` (101 lines, 44+ entries) |
-| Dedicated | `app/project/blueprint/components/<name>/default-props.tsx` | `app/project/default-props.tsx` (115 lines, 44+ entries) |
+| Stronger | `app/project/blueprint/components/<name>/default-props.tsx` | `app/project/default-props.tsx` (~170 lines, 70 entries, 59 files) |
+| Miss Mary | `app/components/blueprint/<name>/default-props.tsx` | `app/config/default-props.tsx` (~100 lines, 42 entries, 42 files) |
+| Dedicated | `app/project/blueprint/components/<name>/default-props.tsx` | `app/project/default-props.tsx` (~115 lines, 43 entries, 43 files) |
 
 ### The top-level aggregate
 
@@ -240,7 +240,7 @@ The fan-out pattern (one defaults file per component) pays off in three places:
 - **Dead-code elimination.** When Stronger stops using a component, you remove the import and the entry in the aggregate. The default-props file is either deleted or orphaned — a trivial lint check.
 - **Per-feature bundling.** Some clients code-split the aggregate per route, lazy-loading defaults for pages that use them. One file per component makes that trivial.
 
-Miss Mary's aggregate imports 44+ defaults files. Stronger imports 66+. Dedicated imports 44+. Same structure, different component sets — each brand uses the Blueprint components it needs.
+Miss Mary aggregates 42 defaults files. Stronger aggregates 59. Dedicated aggregates 43. Same structure, different component sets — each brand uses the Blueprint components it needs.
 
 ### When to add a new default
 

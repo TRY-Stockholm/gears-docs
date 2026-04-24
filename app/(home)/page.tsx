@@ -137,7 +137,7 @@ const platform: Feature[] = [
   {
     title: 'Centra Mappers',
     description:
-      '27 default mappers, spread-and-override to attach brand-specific fields.',
+      '26 default mappers, spread-and-override to attach brand-specific fields.',
     href: '/docs/guides/centra-mappers',
     icon: <IconLayers />,
   },
@@ -285,6 +285,21 @@ const stores: Array<{ name: string; url: string; description: string }> = [
     url: 'https://www.strongerlabel.com',
     description: 'Activewear with global fulfillment.',
   },
+  {
+    name: 'Astrid Lindgren',
+    url: 'https://www.astridlindgren.com',
+    description: 'Children\u2019s books and merchandise from the estate.',
+  },
+  {
+    name: 'Röhnisch',
+    url: 'https://www.rohnisch.com',
+    description: 'Swedish women\u2019s sportswear, pan-European D2C.',
+  },
+  {
+    name: 'Mini Rodini',
+    url: 'https://www.minirodini.com',
+    description: 'Swedish children\u2019s fashion, global D2C.',
+  },
 ];
 
 function LiveStores() {
@@ -296,15 +311,15 @@ function LiveStores() {
             In production
           </p>
           <h2 className="mt-2 text-3xl font-semibold tracking-tight md:text-4xl">
-            Three storefronts, one toolkit.
+            Six storefronts, one toolkit.
           </h2>
           <p className="mt-3 text-fd-muted-foreground">
-            Every pattern in these docs is lifted from a live store. If a snippet is
-            here, it&apos;s running in production.
+            Every pattern in these docs is lifted from a live store. If a snippet
+            is here, it&apos;s running in production.
           </p>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {stores.map((store) => (
             <a
               key={store.url}

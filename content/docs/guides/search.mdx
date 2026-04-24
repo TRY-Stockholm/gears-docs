@@ -181,21 +181,21 @@ Three things to notice:
 Every adapter implements these four methods:
 
 ```ts
-export type SearchResultMethods = {
+export interface SearchResultMethods {
   fetchSearchResult: () => Promise<SearchResult>;
   loadPage: (
     page: number,
-    currentSearchResult: SearchResult | undefined,
+    currentSearchResult?: SearchResult,
   ) => Promise<SearchResultItem[]>;
   setFacets: (
-    newFacets: SearchResultFacet[],
-    currentSearchResult: SearchResult | undefined,
+    facets: SearchResultFacet[],
+    currentSearchResult?: SearchResult,
   ) => Promise<SearchResult>;
   setSortOrder: (
-    sort: SearchResultSort,
-    currentSearchResult: SearchResult | undefined,
+    sorts: SearchResultSort[],
+    currentSearchResult?: SearchResult,
   ) => Promise<SearchResult>;
-};
+}
 ```
 
 | Method | Called when |
