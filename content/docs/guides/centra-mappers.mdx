@@ -1,0 +1,378 @@
+---
+title: Centra Mappers
+description: How Centra API responses become the Grease data model — the 27 default mappers, the options they read, and how each client overrides them per brand
+---
+
+## What you'll learn
+
+How `@made-people/grease-centra` maps every Centra Checkout API response into the Grease domain model (cart, product, order, customer), and where to plug in your own mapper to attach client-specific attributes — price badges, category paths, Voyado/Algolia IDs, color swatches, bundle flags.
+
+## The four things to know
+
+1. **Grease hooks never see raw Centra.** Every Centra response runs through a mapper before it reaches `grease-cart`, `grease-product`, `grease-order`, or `grease-customer`. You override at the mapper layer, not the component layer.
+2. **27 default mappers ship with the package.** `defaultCentraCheckoutApiMappers` covers selection, cart, order, customer, product, bundle, voucher. You override a subset; the rest keep working.
+3. **Mappers take a second argument: `CentraCheckoutApiMapperOptions`.** Runtime context (`currencyCode`, `countryCode`) + product config (`productImageKey`, `uriField`, dimension parsing) lives here. It's the same across every mapper in a given render.
+4. **The `CentraProvider.mapperOptions` prop wires both.** Pass your overrides as `mappers` and your options as `options`. The provider merges your overrides over `defaultCentraCheckoutApiMappers` and threads `options` through every call.
+
+## Prerequisites
+
+- A client frontend that already mounts `CentraProvider` — see [Implementing Centra](./centra).
+- A `FrontendContextV1` supplying `currency`, `country`, `market`, `pricelist`, `language`.
+- Familiarity with Centra's Checkout API product shape. The raw types live in `@made-people/centra-checkout-api`.
+
+## 1. Why there's a mapper layer at all
+
+Centra's Checkout API returns a large, loosely-typed product object — shipping multiple price lists, bundle metadata, variant-level media, custom attribute bags (`pr_*` fields), and a pile of booleans. The Grease UI packages consume a narrower, stricter domain — `Product`, `ProductVariant`, `Cart`, `LineItem`, `Order`, `Customer`.
+
+A mapper is a pure function: raw Centra in, Grease domain out. Every call site in `grease-centra` runs the raw response through a mapper before handing it to a hook. That gives you three things:
+
+- **Type safety past the boundary.** Grease components type-check against the Grease shape, not against Centra's union-heavy response.
+- **A single place to normalize.** Discount logic, category fallbacks, variant URL construction, image key selection — all centralized.
+- **Per-tenant overrides without forking.** Stronger renders `productImageKey: "original"`, Dedicated renders `"ded-zoom"`, Miss Mary attaches dimension parsing for waist/cup sizes. Same package, same hooks.
+
+## 2. `CentraCheckoutApiMapperOptions`
+
+Every mapper takes two arguments: the raw Centra entity, and an options object shared across the whole provider tree.
+
+From `src/frontend/grease/centra/src/utils/mappers/checkout-api/centra-checkout-api-mapper-options.ts`:
+
+```ts
+export type CentraCheckoutApiMapperOptions = {
+  context: {
+    currencyCode: string;
+    countryCode: string;
+  };
+  productOptions: {
+    uriField?: string;
+    productImageKey: string;
+    itemDimensionParser?: (
+      item: CentraCheckoutApiProductItem,
+    ) => ProductVariantDimension[];
+    itemDimensionParseOptions?: {
+      dimensionInfo: CentraCheckoutApiMapperOptionsDimensionInfo[];
+    };
+  };
+};
+```
+
+| Field | What it controls |
+|---|---|
+| `context.currencyCode` / `context.countryCode` | Passed into price formatting, availability, tax display. Comes from `FrontendContextV1`. |
+| `productOptions.productImageKey` | Which Centra image variant to pick for the main product image (`original`, `ded-zoom`, etc.). Set per client. |
+| `productOptions.uriField` | Which custom product field holds the canonical URL slug. Miss Mary uses `variant_uri_en`. |
+| `productOptions.itemDimensionParser` | Custom fn that maps `item.*` fields to `ProductVariantDimension[]`. Use when dimensions aren't name/value-shaped. |
+| `productOptions.itemDimensionParseOptions.dimensionInfo` | Declarative alternative: a list of `{ key, label }` pairs for the default parser. |
+
+Pick **one** of `itemDimensionParser` or `itemDimensionParseOptions` — they're mutually exclusive. Custom parser wins if both are set.
+
+## 3. The 27 default mappers
+
+Everything ships from `src/frontend/grease/centra/src/utils/mappers/checkout-api/default-centra-checkout-api-mappers.ts`. You import the whole object and spread your overrides on top:
+
+```ts
+import { defaultCentraCheckoutApiMappers } from "@made-people/grease-centra";
+
+export const strongerCentraMappers = {
+  ...defaultCentraCheckoutApiMappers,
+  centraCheckoutApiProductToGreaseProductMedia: strongerProductMedia,
+  centraCheckoutApiItemToGreaseProductVariant: strongerItemToVariant,
+};
+```
+
+The 27 mappers fall into five groups:
+
+**Product (10)** — the biggest surface, where most client overrides live:
+
+- `centraCheckoutApiProductToGreaseProduct`
+- `centraCheckoutApiProductToGreaseProductBase`
+- `centraCheckoutApiProductToGreaseProductContent`
+- `centraCheckoutApiProductToGreaseProductMedia`
+- `centraCheckoutApiProductToGreaseProductExtraAttributes`
+- `centraCheckoutApiProductToGreaseProductBadges`
+- `centraCheckoutApiProductToGreaseProductWithVariants`
+- `centraCheckoutApiProductToGreaseProductSimple`
+- `centraCheckoutApiProductToGreaseItemProduct`
+- `centraCheckoutApiRelatedProductsToSiblingProducts`
+
+**Item (4)** — cart-line / PDP variant level:
+
+- `centraCheckoutApiItemToGreaseProductVariant`
+- `centraCheckoutApiItemToGreasePurchaseInfo`
+- `centraCheckoutApiProductItemToGreaseProductVariantDimensions`
+
+**Selection / Cart / Order (8)**:
+
+- `centraCheckoutApiSelectionToGreaseCart`
+- `centraSelectionItemToGreaseLineItem`
+- `centraSelectionToGreaseCartTotals`
+- `centraCheckoutApiCustomerToGreaseCustomer`
+- `centraCheckoutApiOrderToGreaseOrder`
+- `centraCheckoutApiOrderAddressToGreaseOrderAddress`
+- `centraCheckoutApiOrderStatusToGreaseOrderStatus`
+- `centraCheckoutApiOrderTotalsToGreaseOrderTotals`
+
+**Bundle (3)**:
+
+- `centraCheckoutApiBundleToGreaseBundle`
+- `centraCheckoutApiBundleToGreaseBundlePurchaseInfo`
+- `centraCheckoutApiBundleToGreaseBundleSections`
+
+**Voucher (2)**:
+
+- `centraCheckoutApiAutoVoucherToGreaseAutoVoucher`
+- `centraCheckoutApiVoucherToGreaseCodeVoucher`
+
+Each name encodes the direction: `<inputShape>To<OutputShape>`. The TypeScript type `CentraCheckoutApiMappers` (the key union) is your cheat sheet — autocomplete will show you the 27.
+
+## 4. Client options — three examples
+
+### Stronger — minimal override
+
+`client-frontends/stronger/app/project/mappers/centra/get-centra-mapper-options.ts`:
+
+```ts
+export const PRODUCT_IMAGE_KEY_STRONGER = "original";
+
+export function getCentraMapperOptions(frontendContext: FrontendContextV1) {
+  return {
+    context: {
+      currencyCode: frontendContext.currency.currency!,
+      countryCode: frontendContext.country!,
+    },
+    productOptions: {
+      productImageKey: PRODUCT_IMAGE_KEY_STRONGER,
+    },
+  };
+}
+```
+
+One image key constant, no dimension parsing, no URL field override. Enough for a catalog where all products share the default image and the default slug logic.
+
+### Miss Mary — dimensions + URL field
+
+`client-frontends/miss-mary/app/services/centra/mappers/utils/get-centra-mapper-options.ts`:
+
+```ts
+export const productImageKey = "original";
+export const productUriField = "variant_uri_en";
+
+export const dimensionInfo: CentraCheckoutApiMapperOptionsDimensionInfo[] = [
+  { key: "waist-size", label: "Item_Dimension_Waist_Size" },
+  { key: "cup-size", label: "Item_Dimension_Cup_Size" },
+];
+
+export const productOptions: CentraCheckoutApiMapperOptions["productOptions"] = {
+  productImageKey,
+  itemDimensionParseOptions: { dimensionInfo },
+  uriField: productUriField,
+};
+
+export const getCentraCheckoutApiMapperOptions = (
+  frontendContext: FrontendContextV1,
+): CentraCheckoutApiMapperOptions => ({
+  productOptions,
+  context: {
+    currencyCode: frontendContext.currency.currency!,
+    countryCode: frontendContext.country!,
+  },
+});
+```
+
+Miss Mary declares two product dimensions (`waist-size`, `cup-size`) that the default dimension parser knows how to pull off `item.*` fields matching the given labels. And `variant_uri_en` is the custom Centra field that carries the English-localized slug — every product URL is built off it instead of the default `variant` URI.
+
+### Dedicated — custom parser
+
+`client-frontends/dedicated/app/project/mappers/centra/get-centra-mapper-options.ts`:
+
+```ts
+export const PRODUCT_IMAGE_KEY_DEDICATED = "ded-zoom";
+
+export function getCentraMapperOptions(frontendContext: FrontendContextV1) {
+  return {
+    context: {
+      currencyCode: frontendContext.currency.currency!,
+      countryCode: frontendContext.country!,
+    },
+    productOptions: {
+      productImageKey: PRODUCT_IMAGE_KEY_DEDICATED,
+      itemDimensionParser,
+    },
+  };
+}
+```
+
+Dedicated's products don't fit the `{ key, label }` model cleanly, so it ships a custom `itemDimensionParser` and the declarative `dimensionInfo` is omitted. The parser function has full access to the raw item and returns whatever shape it needs.
+
+## 5. Writing a mapper override
+
+The pattern every client follows: call the default mapper first, spread its output, then append your client-specific logic.
+
+From `client-frontends/miss-mary/app/services/centra/mappers/mm-product-extra-attributes.ts`:
+
+```ts
+import { centraCheckoutApiProductToGreaseProductExtraAttributes } from "@made-people/grease-centra";
+import type { CentraCheckoutApiMappers } from "@made-people/grease-centra";
+import { mmColorSwatchSchema } from "./schemas";
+import { ALGOLIA_OBJECT_ID_ATTRIBUTE_KEY } from "../constants";
+
+export const mmProductExtraAttributes: CentraCheckoutApiMappers["centraCheckoutApiProductToGreaseProductExtraAttributes"] =
+  (product) => {
+    const isFixedBundle = product.bundleInfo?.type === "fixed";
+
+    const extraAttributes = [
+      ...centraCheckoutApiProductToGreaseProductExtraAttributes(product),
+      ...(isFixedBundle
+        ? [
+            {
+              attributeKey: "is_fixed_bundle",
+              attributeLabel: "Is Fixed Bundle",
+              value: true,
+              valueLabel: "true",
+            },
+          ]
+        : []),
+      {
+        attributeKey: "product_parent_id",
+        attributeLabel: "Product Parent ID",
+        value: product.productSku,
+        valueLabel: product.productSku,
+      },
+      {
+        attributeKey: "product_main_category",
+        attributeLabel: "Product Main Category",
+        value: product.categoryUri,
+        valueLabel:
+          product.categoryName?.join(" / ") ?? "Miss Mary of Sweden",
+      },
+      {
+        attributeKey: ALGOLIA_OBJECT_ID_ATTRIBUTE_KEY,
+        attributeLabel: ALGOLIA_OBJECT_ID_ATTRIBUTE_KEY,
+        value: `product-${product.product}`,
+        valueLabel: `product-${product.product}`,
+      },
+    ];
+
+    const colorSwatchData = mmColorSwatchSchema.safeParse(product.color_swatch);
+    if (colorSwatchData.success) {
+      return [
+        ...extraAttributes,
+        {
+          attributeKey: "product_color_image_url",
+          attributeLabel: "Product Color Image URL",
+          value: colorSwatchData.data.image.url,
+          valueLabel: colorSwatchData.data.description,
+        },
+      ];
+    }
+
+    return extraAttributes;
+  };
+```
+
+Four things to notice:
+
+1. **The type annotation is load-bearing.** `CentraCheckoutApiMappers["centraCheckoutApiProductToGreaseProductExtraAttributes"]` gives you the exact signature of the mapper you're replacing — argument types, return type, everything.
+2. **Zod guards the custom Centra fields.** `product.color_swatch` and `product.color` are loose `any`s out of Centra — `safeParse` filters out bad shapes so the mapper never throws.
+3. **Each attribute is `{ attributeKey, attributeLabel, value, valueLabel }`.** That's the Grease `ProductExtraAttribute` shape — it gets rendered as-is by `ProductCard`, PDP blocks, and GTM mappers downstream.
+4. **Algolia's object ID is set here.** The search result hydration layer reads `product_algolia_object_id` off the extra attributes — if it's missing, the product won't sync into the Algolia adapter. Same pattern for Voyado IDs, Depict category IDs, etc.
+
+## 6. Wiring mappers into `CentraProvider`
+
+From `client-frontends/stronger/app/project/bootstrap/centra/centra-bootstrap.tsx`:
+
+```tsx
+const centraProviderProps: CentraProviderProps = {
+  mapperOptions: {
+    mappers: strongerCentraMappers,
+    options: {
+      productOptions: {
+        productImageKey: PRODUCT_IMAGE_KEY_STRONGER,
+      },
+      context: {
+        currencyCode: frontendContext.currency.currency!,
+        countryCode: frontendContext.country!,
+      },
+    },
+  },
+  checkoutAPIClient: centraCheckoutAPIClient,
+  initializationType:
+    pageType === "checkoutFinalize" ? "dontInitialize" : "onLoad",
+  queryContext: {
+    market: frontendContext.market,
+    pricelist: frontendContext.pricelist,
+    language: frontendContext.language,
+    site: {
+      baseUrl: frontendContext.baseUrl,
+      slug: frontendContext.siteSlug,
+    },
+  },
+};
+```
+
+`mapperOptions.mappers` is the merged object (defaults spread, overrides on top). `mapperOptions.options` is the shared `CentraCheckoutApiMapperOptions`. Both get read on every query.
+
+The pattern in repo:
+
+1. A `get-centra-mapper-options.ts` file builds `options` from `frontendContext`.
+2. A `<client>-centra-mappers.ts` file exports the spread-and-override mapper object.
+3. A `centra-bootstrap.tsx` file composes both into `mapperOptions` and mounts `<CentraProvider>`.
+
+Keep the three files separate — they have different concerns and different change cadence.
+
+## 7. How much should you override?
+
+| Override count | Pattern | Example |
+|---|---|---|
+| 0 mappers | Use defaults; configure only `options`. | A new client that doesn't need custom attributes |
+| 1–3 mappers | Targeted override, usually `ProductExtraAttributes` and `ProductBadges`. | Stronger + Dedicated |
+| 4–7 mappers | Substantive override layer — custom bundle display, custom price logic, etc. | Miss Mary (7 mappers), Stronger (6 mappers) |
+| 10+ mappers | You're probably re-implementing the package. Stop and ask if you really have a Centra-shaped catalog. | (None in repo) |
+
+The repo's three live clients all sit in the 4–7 range. That's the sweet spot.
+
+## 8. Which mapper should I override?
+
+Use this cheat sheet when you get a new requirement:
+
+| Requirement | Mapper |
+|---|---|
+| Attach a GTM / Algolia / Voyado / Depict ID to every product | `centraCheckoutApiProductToGreaseProductExtraAttributes` |
+| Change which Centra image key is the primary image | (just set `productOptions.productImageKey`) |
+| Show a custom "sale", "new", "fixed bundle" label | `centraCheckoutApiProductToGreaseProductBadges` |
+| Handle multi-currency or price-formatting differently | `centraCheckoutApiItemToGreasePurchaseInfo` |
+| Resolve variant dimensions from non-standard fields | `centraCheckoutApiProductItemToGreaseProductVariantDimensions` (or `itemDimensionParser`) |
+| Build variant URLs from a custom slug field | (just set `productOptions.uriField`) |
+| Normalize order-status strings per locale | `centraCheckoutApiOrderStatusToGreaseOrderStatus` |
+| Attach cart-line metadata (subscription flags, gift wraps) | `centraSelectionItemToGreaseLineItem` |
+| Customize customer profile fields surfaced to Grease | `centraCheckoutApiCustomerToGreaseCustomer` |
+
+When in doubt, search repo for the mapper name — chances are another client already overrode it.
+
+## Gotchas
+
+- **Always call the default first.** `...centraCheckoutApiProductToGreaseProductExtraAttributes(product)` at the top of your override keeps the baseline attributes the rest of the package expects. Forgetting this silently breaks `useProduct` consumers downstream.
+- **Mapper options are shared — don't close over request state.** `CentraCheckoutApiMapperOptions` is constructed once per provider render. Putting mutable state in it (a page-specific flag, a scroll position) means you'll get stale values on the next query. Use React context / hooks for that.
+- **`productImageKey` must match a real Centra image size.** Centra stores image variants under configured keys. A typo (`"oiginal"`) yields undefined image URLs and blank PDP hero images. Check `product.media.images[].sizes` to confirm the keys your instance ships.
+- **`itemDimensionParseOptions.dimensionInfo.label` is the Centra field label.** It's case- and hyphen-sensitive. `"Item_Dimension_Waist_Size"` doesn't match `"item_dimension_waist_size"`. Copy the exact label from your Centra instance.
+- **Extra attributes with `valueLabel: undefined` break card rendering.** Blueprint's attribute display reads `valueLabel` first. Fall back to `String(value)` or the attribute won't render a human-readable value.
+
+## Troubleshooting
+
+**PDP hero image is blank** — `productOptions.productImageKey` doesn't match any key in Centra's image response. Open the raw Centra product in DevTools network, find `media.images[0].sizes`, confirm the key.
+
+**Category slug is wrong** — Miss Mary / Dedicated use `uriField: "variant_uri_<locale>"`. If you rely on that and the field isn't filled in Centra for a given locale, the URL falls back to the Centra default. Populate the field in Centra, or add a `categoryUri` fallback in your mapper.
+
+**Algolia / Voyado doesn't find the product** — the search adapter reads the vendor ID off `extraAttributes`. Open the product in React DevTools, inspect `extraAttributes`, confirm the expected key exists. If it doesn't, you forgot to append it in `centraCheckoutApiProductToGreaseProductExtraAttributes`.
+
+**Variants render without size labels** — the dimension parser didn't recognize the Centra fields. Either switch to a custom `itemDimensionParser` or add the missing `{ key, label }` pair to `dimensionInfo`.
+
+**Override seems ignored** — you forgot to pass `mapperOptions.mappers` into `CentraProvider`, or you spread your overrides *before* `defaultCentraCheckoutApiMappers` instead of after. Defaults must come first; overrides must come last.
+
+## Related
+
+- [Implementing Centra](./centra) — the surrounding provider setup and driver wiring
+- [Implementing Product](./product) — what the mapped `Product` shape is consumed by
+- [Implementing Algolia](./algolia) — why `ProductExtraAttributes` carries search object IDs
+- [Implementing Voyado Engage](./implementing-voyado-engage) — how identification events use mapped customer data
+
+**Next:** [Search](./search) · [SEO Routes](./seo-routes) · [Anatomy of a Gears Client](./anatomy-of-a-gears-client)

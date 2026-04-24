@@ -1,0 +1,354 @@
+---
+title: Grease Image
+description: How image URLs are rewritten at render time — the processor chain, the built-in processors, and how to plug in a new CDN
+---
+
+## What you'll learn
+
+How `@made-people/grease-image` takes any image URL and rewrites it to a CDN-optimized variant — width, quality, format — via a chain-of-responsibility pipeline, and how to add a processor for your own CDN without touching a single component.
+
+## The three things to know
+
+1. **Image components don't know about CDNs.** They call `useImageProcessor()`, get a function, pass a URL + options in, get a transformed URL out. The processor registry is configured once at the app root.
+2. **Processors are a chain, not a map.** Each processor answers "is this my URL?" (`shouldHandleImage`). The first one to say yes transforms the URL. Order matters — the first match wins.
+3. **Six processors ship with the package.** Cloudflare, Storyblok, Imgproxy, Placehold.it, Echo (identity), and a chain composer. You pick which ones to mount per client.
+
+## Prerequisites
+
+- A React client with `@made-people/grease-image` installed.
+- A CDN URL or transformation endpoint for each image source you need (Cloudflare zone, Storyblok asset domain, etc.).
+
+## Install
+
+```bash
+# Inside the monorepo
+rush add -p @made-people/grease-image
+
+# Outside the monorepo
+pnpm add @made-people/grease-image
+```
+
+## 1. The chain of responsibility
+
+`src/frontend/grease/image/src/processor/image-processor-chain.ts`:
+
+```ts
+export function imageProcessorChain(
+  processors: ImageProcessor[],
+): ImageProcessor["process"] {
+  return (image: string, options: ImageProcessingOptions) => {
+    for (const processor of processors) {
+      if (processor.shouldHandleImage(image, options)) {
+        return processor.process(image, options);
+      }
+    }
+    throw new Error(`No ImageProcessor found for image URL '${image}'`);
+  };
+}
+```
+
+Walk the list in order. Each processor decides whether it owns the URL. The first one that says yes transforms it. If nothing matches, throw — explicit failure, not a silent identity pass-through.
+
+That "first match wins" rule is the whole architecture. Everything else is just implementing the two-method interface.
+
+## 2. The `ImageProcessor` interface
+
+`src/frontend/grease/image/src/processor/image-processor.ts`:
+
+```ts
+export type ImageProcessorFormat = "webp" | "jpeg" | "png" | "svg" | "auto";
+
+export type ImageAspectRatio = `${number}/${number}` | "auto";
+
+export interface ImageProcessingOptions {
+  format?: ImageProcessorFormat;
+  width?: number;
+  height?: number;
+  quality?: number;
+  gravity?: "left" | "right" | "top" | "bottom" | { x: number; y: number };
+}
+
+export interface ImageProcessor {
+  process(imageUrl: string, options: ImageProcessingOptions): string;
+  shouldHandleImage(imageUrl: string, options: ImageProcessingOptions): boolean;
+}
+```
+
+Two methods. `shouldHandleImage` is a predicate — parse the URL, check the host, return a boolean. `process` is a pure URL transform — take the input URL, append whatever query or path segments the CDN wants, return the new URL.
+
+Both methods receive the same `ImageProcessingOptions` — a union-of-features superset. Processors pick the subset their CDN supports and ignore the rest.
+
+## 3. The shipped processors
+
+| Processor | URL match | Notes |
+|---|---|---|
+| `CloudflareImageProcessor` | Custom domain via constructor | Uses `/cdn-cgi/image/` path transformation. Rich options: `fit`, `gravity`, `dpr`, `blur`, `brightness`, etc. |
+| `StoryblokImageProcessor` | `*.storyblok.com` | Uses `/m/WIDTHxHEIGHT/filters:quality(N)` path syntax. Defaults to 80% quality. |
+| `ImgproxyImageProcessor` | Configured base | For self-hosted Imgproxy instances |
+| `PlaceholditImageProcessor` | `placehold.it` | For dev / testing with placeholder images |
+| `EchoImageProcessor` | Matches everything | Returns the URL unchanged — identity processor for Storybook/mocks |
+
+### Storyblok — URL-match based
+
+`src/frontend/grease/image/src/processor/storyblok-image-processor.ts`:
+
+```ts
+export class StoryblokImageProcessor implements ImageProcessor {
+  process(imageUrl: string, options: ImageProcessingOptions): string {
+    const parameters: string[] = ["m"]; // "m" means auto WebP
+    if (options.width && !options.height) {
+      parameters.push(`${options.width}x0`);
+    } else if (options.width && options.height) {
+      parameters.push(`${options.width}x${options.height}`);
+    }
+    const quality = options.quality ?? 80;
+    parameters.push(`filters:quality(${quality})`);
+    return [imageUrl, ...parameters].join("/");
+  }
+
+  shouldHandleImage(imageUrl: string): boolean {
+    try {
+      const url = new URL(imageUrl);
+      return /storyblok\.com$/.test(url.host);
+    } catch (e) {
+      console.error(`Couldn't parse imageURL '${imageUrl}'`, e);
+      return false;
+    }
+  }
+}
+```
+
+URL-match processors don't take constructor args — they match any URL on the vendor's own domain.
+
+### Cloudflare — base-URL configured
+
+```ts
+export class CloudflareImageProcessor implements ImageProcessor {
+  constructor(private baseUrl: string) {}
+  // ...
+}
+```
+
+Cloudflare images can be served from any domain proxied through a Cloudflare zone, so you pass the base URL at construction. `shouldHandleImage` matches against that base. Usage:
+
+```ts
+new CloudflareImageProcessor("https://assets.missmaryofsweden.com");
+```
+
+### Echo — the escape hatch
+
+Matches everything, returns the input URL unchanged. Use it:
+
+- In Storybook, where you don't want network CDN calls.
+- In tests, where the URL doesn't matter.
+- As the final entry in the chain, as an explicit fallback for unrecognized URLs.
+
+Be careful with the last one — if you want explicit failure on unknown CDNs (the default), don't add `EchoImageProcessor`.
+
+## 4. Mounting the provider
+
+`ImageProcessorProvider` takes an array of processors and exposes the chain via context:
+
+```tsx
+import {
+  ImageProcessorProvider,
+  CloudflareImageProcessor,
+  StoryblokImageProcessor,
+} from "@made-people/grease-image";
+
+const imageProcessorProps = {
+  processors: [
+    new StoryblokImageProcessor(),
+    new CloudflareImageProcessor("https://www.strongerlabel.com"),
+  ],
+};
+
+export const App = () => (
+  <ImageProcessorProvider {...imageProcessorProps}>
+    <Shell />
+  </ImageProcessorProvider>
+);
+```
+
+The provider memoizes its value — the chain function is recomputed only when `processors` changes reference. Pass the array as a stable reference (outside the render, or via `useMemo`) if processor lists change based on context.
+
+Source — `src/frontend/grease/image/src/image-processor-context.tsx`:
+
+```tsx
+export const ImageProcessorProvider = memo(
+  (props: ImageProcessorProviderProps) => {
+    const value = imageProcessorChain(props.processors);
+    return (
+      <imageProcessorContext.Provider value={value}>
+        {props.children}
+      </imageProcessorContext.Provider>
+    );
+  },
+);
+
+export const useImageProcessor = (): ImageProcessor["process"] => {
+  const processor = useContext(imageProcessorContext);
+  if (!processor) {
+    throw new Error(
+      "useImageProcessor must be used within an ImageProcessorProvider",
+    );
+  }
+  return processor;
+};
+```
+
+`useImageProcessor()` throws if called outside the provider. No silent failure — either the provider is mounted or you get a loud error pointing at the bug.
+
+## 5. Using the processor in a component
+
+```tsx
+import { useImageProcessor } from "@made-people/grease-image";
+
+export const ProductImage = ({ url, width, height }: Props) => {
+  const processImage = useImageProcessor();
+
+  const src = processImage(url, { width, height, quality: 80 });
+  const srcSet = [
+    `${processImage(url, { width: width, height, quality: 80 })} 1x`,
+    `${processImage(url, { width: width * 2, height: height * 2, quality: 80 })} 2x`,
+  ].join(", ");
+
+  return <img src={src} srcSet={srcSet} width={width} height={height} />;
+};
+```
+
+The hook returns the same processed-chain function everywhere in the tree. Call it with whatever `ImageProcessingOptions` make sense for the render — the processors that don't support your options will ignore them.
+
+Most Blueprint components that render images (`Image`, `ImageGallery`, `ProductCard`, `Banner`) wrap this pattern once and take URL + dimensions as props.
+
+## 6. Real-world configurations
+
+### Miss Mary — single processor
+
+`client-frontends/miss-mary/app/bootstrap/image-processor.ts`:
+
+```ts
+import {
+  CloudflareImageProcessor,
+  ImageProcessorProviderProps,
+} from "@made-people/grease-image";
+
+const cloudflareBaseUrl = "https://assets.missmaryofsweden.com";
+export const cloudflareImageProcessor = new CloudflareImageProcessor(
+  cloudflareBaseUrl,
+);
+
+export const imageProcessorProps: ImageProcessorProviderProps = {
+  processors: [
+    // new StoryblokImageProcessor(),
+    cloudflareImageProcessor, // Just using cloudflare is faster for storyblok as well
+  ],
+};
+```
+
+Note the commented-out Storyblok processor. Miss Mary routes *everything* through Cloudflare — including Storyblok-hosted assets. It's faster: Cloudflare's edge cache is warmer than Storyblok's for their domain.
+
+### Stronger — two-stage chain
+
+`client-frontends/stronger/app/project/bootstrap.tsx`:
+
+```ts
+const cloudflareBaseUrl = "https://www.strongerlabel.com";
+
+const imageProcessorProps: ImageProcessorProviderProps = {
+  processors: [
+    new StoryblokImageProcessor(),
+    new CloudflareImageProcessor(cloudflareBaseUrl),
+  ],
+};
+```
+
+Storyblok first, Cloudflare second. Storyblok URLs (`*.storyblok.com`) route to Storyblok's CDN; everything else (Centra product images under `strongerlabel.com`) routes to Cloudflare. If both could match a URL, the Storyblok processor wins because it's earlier in the array.
+
+### Order matters
+
+Swap the array order and Cloudflare would try to transform Storyblok URLs — usually yielding broken paths. When you have two URL-match processors with overlapping domains, put the **more specific** match first.
+
+## 7. Adding a custom processor
+
+Implement `ImageProcessor`, hand it to the provider. That's it.
+
+Example — a hypothetical Bunny CDN:
+
+```ts
+import {
+  ImageProcessor,
+  ImageProcessingOptions,
+} from "@made-people/grease-image";
+
+export class BunnyImageProcessor implements ImageProcessor {
+  constructor(private baseUrl: string) {}
+
+  shouldHandleImage(imageUrl: string): boolean {
+    try {
+      return imageUrl.startsWith(this.baseUrl);
+    } catch {
+      return false;
+    }
+  }
+
+  process(imageUrl: string, options: ImageProcessingOptions): string {
+    const params = new URLSearchParams();
+    if (options.width) params.set("width", String(options.width));
+    if (options.height) params.set("height", String(options.height));
+    if (options.quality) params.set("quality", String(options.quality));
+    if (options.format && options.format !== "auto") {
+      params.set("format", options.format);
+    }
+    const separator = imageUrl.includes("?") ? "&" : "?";
+    return `${imageUrl}${separator}${params.toString()}`;
+  }
+}
+```
+
+Wire it in:
+
+```tsx
+<ImageProcessorProvider
+  processors={[
+    new BunnyImageProcessor("https://cdn.example.com"),
+    new StoryblokImageProcessor(),
+    new CloudflareImageProcessor(cloudflareBaseUrl),
+  ]}
+>
+  {children}
+</ImageProcessorProvider>
+```
+
+Three things to test:
+
+1. **Match precision.** Does `shouldHandleImage` return `true` only for URLs you own? Test it against Storyblok and Cloudflare URLs — it should return `false` for both.
+2. **Option coverage.** Every option the rest of your app uses (width, quality, format) should produce a valid CDN URL. Options the CDN doesn't support, you drop silently.
+3. **Non-mutating.** `process` must be pure. No side effects, no logging past dev, same input → same output.
+
+## Gotchas
+
+- **Order matters.** The first processor to return `true` wins. Put the most specific URL match first.
+- **Unknown URL throws.** `imageProcessorChain` throws `No ImageProcessor found for image URL '...'` if nothing matches. That's intentional — silent fallthrough produces broken images you won't notice until QA. If you really want identity fallback, add `EchoImageProcessor` at the end.
+- **`useImageProcessor` throws outside the provider.** The hook throws instead of returning `undefined` — the error is explicit, which saves debugging time when a component renders outside the tree.
+- **CDN option dialects differ.** Cloudflare supports `fit: "cover"`; Storyblok doesn't. Passing `fit` in `ImageProcessingOptions` is silently ignored by the Storyblok processor. If you're relying on it, test against the processor you actually hit.
+- **Trailing slashes in base URLs.** `CloudflareImageProcessor` matches `imageUrl.startsWith(baseUrl)`. `"https://cdn.example.com/"` and `"https://cdn.example.com"` are different. Copy the exact value you serve from.
+- **SVGs and GIFs.** Cloudflare image resizing doesn't handle SVG/GIF well. If you mix them in, consider a per-format branch in your processor that short-circuits to the original URL.
+
+## Troubleshooting
+
+**"No ImageProcessor found" error** — a URL reached the chain with no handler. Check: (a) is the URL what you expect (`console.log` it)? (b) does any processor's `shouldHandleImage` match it? Most often it's a Centra image served from an unexpected domain, and you forgot to register a Cloudflare/origin processor for it.
+
+**Image loads but isn't resized** — the processor ran but your CDN ignored the params. Open DevTools, copy the rendered URL, paste into a new tab. If it returns the full-size image, your CDN config (Cloudflare zone, Storyblok plan) isn't doing transformations for that URL.
+
+**First paint shows unoptimized images, then swaps** — you're mounting `ImageProcessorProvider` below a Suspense boundary that re-renders on hydration. Mount it above your whole app shell, not inside a route.
+
+**Custom processor's `process` returns junk** — you're not handling the case where the input URL already has query params. Check for `?` and use `&` as separator.
+
+## Related
+
+- [Implementing Storyblok](./storyblok) — asset URL pipeline from Storyblok
+- [Implementing Centra](./centra) — where product image URLs come from
+- [Implementing Product](./product) — Blueprint components that call `useImageProcessor`
+
+**Next:** [Search](./search) · [Centra Mappers](./centra-mappers) · [SEO Routes](./seo-routes)

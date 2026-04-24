@@ -1,0 +1,341 @@
+---
+title: SEO Routes
+description: How sitemap.xml, robots.txt, and the Google product feed are served as raw XML/text from Remix — the route → loader → BFF controller pipeline
+---
+
+## What you'll learn
+
+How raw-response routes — `sitemap.xml`, `robots.txt`, the product feed — bypass normal page rendering and return raw XML or text, and how the same pipeline composes across all Gears clients with per-client overrides for market-aware domain rewrites.
+
+## The four things to know
+
+1. **Raw-response routes live outside the catch-all.** They're registered explicitly in `vite.config.ts` before `*` so Remix routes them directly instead of through the page tree.
+2. **The loaders are one-liners.** `@made-people/gears-remix` ships `gearsSitemapLoader`, `gearsRobotsTxtLoader`, and `gearsSitemapIndexLoader`. Clients re-export them. No per-client logic by default.
+3. **The BFF generates the XML.** A NestJS controller (`google-sitemap-controller-v1`) builds sitemap XML from Centra products and Storyblok stories, returns `{ content, contentType, statusCode }`.
+4. **Per-client transforms wrap the response.** Miss Mary rewrites sitemap URLs to per-market domains (`www.missmary.se`, `www.missmary.no`). You can slot in any response transform before the client returns.
+
+## Prerequisites
+
+- A Gears client on Remix 2 with `@made-people/gears-remix` and `@made-people/gears-bff-client` installed.
+- A running BFF (`nestjs-bff-service`) with `google-sitemap` endpoints available.
+- Vite configured with Remix's `routes` callback — the default Remix file-system routing doesn't cover the explicit-route pattern you need for SEO files.
+
+## 1. The request flow
+
+```
+Googlebot                    Remix (client)                 BFF (NestJS)
+    │                              │                            │
+    ├── GET /sitemap.xml ─────────►│                            │
+    │                              ├── fetchSitemapIndex() ────►│
+    │                              │                            │
+    │                              │◄── { content, contentType,
+    │                              │      statusCode: 200 }
+    │                              │                            │
+    │◄── 200 application/xml ──────┤                            │
+    │      <sitemapindex>...</> ── │                            │
+```
+
+Three hops, three responsibilities:
+
+- **Vite + Remix**: explicit route registration, HTTP framing, cache headers if you want them.
+- **`gears-bff-client`**: URL parsing, BFF call, error swallowing (404 on empty).
+- **NestJS BFF**: data aggregation from Centra + Storyblok, XML construction, market-aware filtering.
+
+Clients never build XML themselves. They transport it.
+
+## 2. Route registration in Vite
+
+`client-frontends/stronger/vite.config.ts`:
+
+```ts
+routes(defineRoutes) {
+  return defineRoutes((route) => {
+    const routeBaseDir = "gears/routes/raw-response-routes";
+    route("/status", `${routeBaseDir}/status.ts`, {
+      id: "gears-route-status",
+    });
+    route("/robots.txt", `${routeBaseDir}/robots-txt.ts`, {
+      id: "gears-robots-txt",
+    });
+    route("/sitemap.xml", `${routeBaseDir}/sitemap-index.ts`, {
+      id: "gears-sitemap-index",
+    });
+    route("/sitemap/*", `${routeBaseDir}/sitemap.ts`, {
+      id: "gears-sitemap",
+    });
+
+    // Remix requires both entries below for a catch-all route.
+    route("/", "project/router.tsx", {
+      id: "project-router-slash",
+    });
+    route("*", "project/router.tsx", {
+      id: "project-router-wildcard",
+    });
+  });
+}
+```
+
+Two things matter:
+
+1. **Explicit routes before the catch-all.** `/sitemap.xml`, `/robots.txt`, and `/sitemap/*` all match before `*` so Googlebot hits the raw-response route, not the app shell.
+2. **Stable route IDs.** `gears-sitemap-index`, `gears-robots-txt` etc. are referenced in analytics, cache rules, and CDN config. Don't rename them casually.
+
+`/sitemap/*` handles nested sitemaps (`/sitemap/products/stronger-se`, `/sitemap/links/stronger-se`) — the `sitemap.ts` loader pulls the `type` and `slug` off the pathname.
+
+## 3. The route files — thin wrappers
+
+Each client's raw-response route is a two-line re-export:
+
+`client-frontends/stronger/app/gears/routes/raw-response-routes/sitemap.ts`:
+
+```ts
+import { gearsSitemapLoader } from "@made-people/gears-remix";
+
+export const loader = gearsSitemapLoader;
+```
+
+`client-frontends/stronger/app/gears/routes/raw-response-routes/sitemap-index.ts`:
+
+```ts
+import { gearsSitemapIndexLoader } from "@made-people/gears-remix";
+
+export const loader = gearsSitemapIndexLoader;
+```
+
+`client-frontends/stronger/app/gears/routes/raw-response-routes/robots-txt.ts`:
+
+```ts
+import { gearsRobotsTxtLoader } from "@made-people/gears-remix";
+
+export const loader = gearsRobotsTxtLoader;
+```
+
+That's it. All the real work lives in `gears-remix` and the BFF.
+
+## 4. The shared Remix loaders
+
+`src/legacy/data-components/gears-remix/src/gears-sitemap.tsx`:
+
+```ts
+import type { LoaderFunction } from "@remix-run/node";
+import { fetchSitemap } from "@made-people/gears-bff-client";
+
+export const loader: LoaderFunction = async ({ request }) => {
+  try {
+    const sitemapXmlResponse = await fetchSitemap(
+      new URL(request.url),
+      request.headers,
+    );
+    if (!sitemapXmlResponse) {
+      return new Response("Not Found", { status: 404 });
+    }
+
+    return new Response(sitemapXmlResponse.content, {
+      status: 200,
+      headers: {
+        "Content-Type": sitemapXmlResponse.contentType,
+      },
+    });
+  } catch (e) {
+    throw new Response("Internal Server Error", { status: 500 });
+  }
+};
+
+export const gearsSitemapLoader = loader;
+```
+
+The same shape recurs for sitemap-index and robots-txt. Three invariants:
+
+- **Empty → 404.** `fetchSitemap` returns `undefined` on an unknown or empty response; the loader converts that to a plain 404.
+- **Error → 500.** Any throw inside the BFF client surfaces as 500 via a Remix error response.
+- **Success → pass-through.** The BFF-declared `contentType` is trusted — it's `application/xml`, `text/plain`, etc. — and passes through unchanged.
+
+No Remix meta, no headers beyond content-type, no HTML. Raw body, content-type, status.
+
+## 5. The BFF client layer
+
+`src/legacy/data-components/gears-bff-client/src/fetchSitemap.ts`:
+
+```ts
+import { getBffClient } from "./getBffClient";
+import type { RawResponsePage } from "@made-people/nestjs-bff-service";
+
+export const fetchSitemap = async (
+  url: URL,
+  headers: Headers,
+): Promise<RawResponsePage | undefined> => {
+  const bffClient = getBffClient();
+  const [, , type, slug] = url.pathname.split("/"); // "/sitemap/<type>/<slug>"
+
+  if (!type || !slug) {
+    console.warn("Invalid sitemap url", url);
+    return undefined;
+  }
+
+  return bffClient
+    .findSitemap({ type, slug, headers })
+    .catch(() => undefined);
+};
+```
+
+The client owns **URL parsing and error flattening**. Three things:
+
+- `/sitemap/<type>/<slug>` is the canonical shape; the client splits and validates before hitting the BFF.
+- `catch(() => undefined)` hides transport errors and timeouts — the loader then returns 404 instead of 500.
+- Headers are forwarded so the BFF can read `X-Forwarded-Host` and scope the sitemap to the right brand/market.
+
+`findSitemap`, `findSitemapIndex`, and `findRobotsTxt` all return the same `RawResponsePage` shape:
+
+```ts
+export interface RawResponsePage {
+  statusCode: 200 | 404;
+  pageType: "rawResponse";
+  contentType: string;
+  content: string;
+}
+```
+
+`content` is the raw XML or text. `contentType` is the MIME. `pageType` is a discriminator used elsewhere in Gears for rendering logic — you won't touch it.
+
+## 6. The BFF controller
+
+`src/services/nestjs/nestjs-bff-service/src/controllers/v1/frontend/google-sitemap-controller-v1.ts`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/google-sitemap/robots-txt` | Renders the brand's `robots.txt` |
+| `GET /v1/google-sitemap/index` | Top-level sitemap index — lists child sitemaps per market |
+| `GET /v1/google-sitemap/products/:siteSlug` | Product sitemap for one market (from Centra) |
+| `GET /v1/google-sitemap/links/:siteSlug` | Story / page sitemap for one market (from Storyblok) |
+
+Controller signatures (abridged):
+
+```ts
+@Get("/robots-txt")
+public async getRobotsTxt(): Promise<RawResponsePage>;
+
+@Get("/index")
+public async index(): Promise<RawResponsePage>;
+
+@Get("/products/:siteSlug")
+public async getProductsGoogleSitemap(
+  @Res({ passthrough: true }) reply: FastifyReply,
+  @Param("siteSlug") siteSlug: string,
+): Promise<RawResponsePage>;
+
+@Get("/links/:siteSlug")
+public async getStoryblokLinksGoogleSitemap(
+  @Res({ passthrough: true }) reply: FastifyReply,
+  @Param("siteSlug") siteSlug: string,
+): Promise<RawResponsePage>;
+```
+
+Inside, the controller:
+
+1. Fetches products (Centra) or stories (Storyblok) for the site slug.
+2. Filters out anything with `globalNoIndex` or a draft flag.
+3. Builds XML with `xmlbuilder2` using the `SitemapUrl` shape:
+
+   ```ts
+   export interface SitemapUrl {
+     loc: string;
+     lastmod?: string;
+     changefreq?: string;
+     priority?: string;
+   }
+   ```
+
+4. Returns `{ content, contentType: "application/xml", statusCode: 200 }`.
+
+The sitemap index aggregates all per-market sitemaps: `/sitemap/products/miss-mary-se`, `/sitemap/links/miss-mary-se`, one pair per configured market.
+
+## 7. Per-client response transforms
+
+Miss Mary runs one brand across `.com`, `.se`, `.no`, `.dk`, `.fi`. The BFF emits sitemap URLs under the canonical base URL, and Miss Mary rewrites them per market on the client.
+
+`client-frontends/miss-mary/app/routes/raw-response-routes/rewrite-sitemap-loc-domains.ts`:
+
+```ts
+export const rewriteUrlDomainBySiteSlug = (value: string): string => {
+  try {
+    const url = new URL(value);
+    const siteSlug = getSiteSlug(url.pathname);
+    const domain = siteSlug ? domainBySiteSlug[siteSlug] : undefined;
+    url.hostname = domain ? `www.${domain}` : "www.missmary.com";
+    return url.toString();
+  } catch {
+    return value;
+  }
+};
+
+export const rewriteSitemapResponse = async (
+  response: Response,
+): Promise<Response> => {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("xml")) return response;
+
+  const xml = await response.text();
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+
+  return new Response(rewriteSitemapLocDomains(xml), {
+    headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+};
+```
+
+Miss Mary's sitemap route then wraps the default loader:
+
+```ts
+import { gearsSitemapLoader } from "@made-people/gears-remix";
+import { rewriteSitemapResponse } from "./rewrite-sitemap-loc-domains";
+
+export const loader: LoaderFunction = async (args) => {
+  const response = await gearsSitemapLoader(args);
+  return rewriteSitemapResponse(response);
+};
+```
+
+That's the pattern for any per-client mutation of the raw XML — wrap the default loader, parse the body, transform, rebuild the `Response`. Remember to `headers.delete("content-length")` before returning — stale content length on a mutated body breaks the response.
+
+## 8. Adding a new SEO route
+
+To add a new raw-response route (say, a BingBot-specific feed):
+
+1. **Add a BFF endpoint** returning `RawResponsePage` — follow the pattern in `google-sitemap-controller-v1`.
+2. **Add a BFF client fetch** in `gears-bff-client` that calls the endpoint and `catch(() => undefined)`s failures.
+3. **Add a loader in `gears-remix`** (or directly in your client) mirroring `gearsSitemapLoader` — wrap the BFF fetch in a Remix `LoaderFunction`, return 404 on empty, 500 on throw.
+4. **Register the route in `vite.config.ts`** with an explicit path before the catch-all. Assign a stable `id`.
+
+Keep the four layers separate. Don't put BFF-aware logic in the Vite config. Don't put URL parsing in the NestJS controller.
+
+## Gotchas
+
+- **File-system routes don't work.** The default Remix file-system router treats `sitemap.xml.ts` as a TS file — it won't pick it up as a route. Explicit `route(...)` in `vite.config.ts` is required.
+- **Catch-all wins silently.** Forgetting to register `/sitemap.xml` before `*` means Googlebot gets your HTML app shell with a 200 and an empty body. It'll look fine in DevTools but Search Console will flag "Sitemap could not be fetched."
+- **Content-length lies after mutation.** If you rewrite the XML body client-side, the original `content-length` header is wrong. `headers.delete("content-length")` before returning — otherwise proxies truncate the response.
+- **Trailing slashes matter.** `/sitemap.xml/` and `/sitemap.xml` are different URLs to Remix. Googlebot uses the canonical form; make sure your redirects are consistent.
+- **BFF 500 becomes client 404.** `catch(() => undefined)` in `fetchSitemap` flattens every failure. Good for availability, bad for debugging. If sitemaps vanish in prod, check the BFF logs directly — the loader won't surface the cause.
+- **`globalNoIndex` is BFF-side.** Toggling a product or story to no-index has to propagate to the BFF's data store. Cached Centra responses can keep serving the old sitemap for a while.
+
+## Troubleshooting
+
+**Sitemap returns 404** — the BFF threw, or the URL shape is wrong. Check the BFF's `google-sitemap-controller-v1` logs for the market slug. Check that `/sitemap/<type>/<slug>` has all three parts.
+
+**Sitemap returns HTML** — explicit routes aren't wired up. Check `vite.config.ts` — the raw-response routes must be registered before `route("*", ...)`.
+
+**URLs in the sitemap are on the wrong domain** — the BFF emits canonical URLs, not market-specific ones. Add a response transform (Miss Mary pattern) or fix the BFF's domain config.
+
+**Content-type is `text/html` instead of `application/xml`** — you're returning the Remix catch-all route. Same fix as above.
+
+**Robots.txt shows an empty body** — the BFF hasn't configured the brand's robots directives, or the header scoping (`X-Forwarded-Host`) isn't reaching the BFF through your CDN. Test by curl-ing the BFF directly: `curl https://bff.example.com/v1/google-sitemap/robots-txt -H "X-Forwarded-Host: www.example.com"`.
+
+## Related
+
+- [The BFF](./bff) — where the sitemap XML is actually built
+- [Implementing Storyblok](./storyblok) — where story / page URLs come from
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — the route tree that sits next to raw-response routes
+
+**Next:** [Image](./image) · [Search](./search) · [Centra Mappers](./centra-mappers)

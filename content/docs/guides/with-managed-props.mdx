@@ -132,7 +132,127 @@ export const Topbar: TopbarProps = {
 
 That's all it takes to skin a component per client.
 
-## 5. The GrowthBook integration
+## 5. Client defaults — the aggregation pattern
+
+Every live client follows the same three-layer structure to build `defaultProps`:
+
+```
+blueprint/components/<component>/default-props.tsx   (one file per component)
+         ↓ imported by
+project/default-props.tsx                             (top-level aggregation)
+         ↓ passed as `fallbackProps` to
+GreaseGrowthbookProvider / ManagedPropsProvider       (in bootstrap.tsx)
+```
+
+The three live clients all follow this shape, with slight variations in directory layout.
+
+| Client | Per-component defaults live in | Aggregated at |
+|---|---|---|
+| Stronger | `app/project/blueprint/components/<name>/default-props.tsx` | `app/project/default-props.tsx` (170 lines, 66+ entries) |
+| Miss Mary | `app/components/blueprint/<name>/default-props.tsx` | `app/config/default-props.tsx` (101 lines, 44+ entries) |
+| Dedicated | `app/project/blueprint/components/<name>/default-props.tsx` | `app/project/default-props.tsx` (115 lines, 44+ entries) |
+
+### The top-level aggregate
+
+`client-frontends/stronger/app/project/default-props.tsx`, abridged to the shape:
+
+```tsx
+import { ManagedPropsLiteral } from "@made-people/managed-props";
+import { Banner } from "./blueprint/components/banner/default-props";
+import { Topbar } from "./blueprint/components/topbar/default-props";
+import {
+  ProductCard,
+  ProductCardQuickshopButtonGrid,
+  QuickshopDrawer,
+} from "./blueprint/components/product-card/default-props";
+// ... 60+ more imports
+
+export const defaultProps: ManagedPropsLiteral = {
+  Banner,
+  Topbar,
+  ProductCard,
+  ProductCardQuickshopButtonGrid,
+  QuickshopDrawer,
+  // ... every component name → default-props object
+  // Renames are allowed:
+  MiniCartSwipeableProductList: MiniCartSwipeableProductListDefaults,
+  FabricCard: FabricCardDefaults,
+  CollectionCard: CollectionCardDefaults,
+};
+```
+
+The object is keyed by `displayName` — the string you passed to `withManagedProps`. An imported symbol called `Defaults` gets renamed to the component name in the object literal. One name mismatch silently drops that component's defaults.
+
+### A single per-component file
+
+`client-frontends/stronger/app/project/blueprint/components/topbar/default-props.tsx`:
+
+```tsx
+import { TopbarProps } from "@made-people/blueprint-topbar";
+
+export const Topbar: TopbarProps = {
+  settings: { template: "ticker" },
+};
+```
+
+Typed against the component's own `Props` type — so autocomplete works and you can't put `settings.tmeplate` by mistake. The exported name (`Topbar`) matches the key in the aggregate — so spread-import works.
+
+More elaborate components carry more defaults:
+
+```tsx
+export const ProductCard: ProductCardProps = {
+  templateProps: {
+    template: "1",
+    productInfoText: { dataKey: "shortDescription" },
+    badges: {
+      location: "gallery",
+      discountBadge: { enabled: true, variants: { color: "red" } },
+    },
+    quickshop: { /* ... */ },
+  },
+};
+```
+
+Same file shape, richer object. No client-level indirection — the file is what `ManagedPropsProvider` will hand to the ProductCard at render time.
+
+### Wiring it into the bootstrap
+
+Stronger wraps `ManagedPropsProvider` via `GreaseGrowthbookProvider` (which composes both sources — defaults + flags):
+
+```tsx
+import { defaultProps } from "./default-props";
+
+<GreaseGrowthbookProvider
+  clientProviderProps={{ client, viewedExperiments: props.gbState?.e }}
+  managedProps={{ fallbackProps: defaultProps }}
+>
+  {children}
+</GreaseGrowthbookProvider>
+```
+
+`fallbackProps` is the layer *below* explicit props — the "I got nothing from the parent, use client defaults" fallback. Feature flags arrive via `deferredOverrideProps` in the same provider. Static overrides (rare; usually debugging) go in `overrideProps`.
+
+### Why one file per component
+
+The fan-out pattern (one defaults file per component) pays off in three places:
+
+- **Ownership.** Each Blueprint component has one defaults file. Changing the ProductCard badge color touches `blueprint/components/product-card/default-props.tsx` — nothing else. Git history per file is narrow and meaningful.
+- **Dead-code elimination.** When Stronger stops using a component, you remove the import and the entry in the aggregate. The default-props file is either deleted or orphaned — a trivial lint check.
+- **Per-feature bundling.** Some clients code-split the aggregate per route, lazy-loading defaults for pages that use them. One file per component makes that trivial.
+
+Miss Mary's aggregate imports 44+ defaults files. Stronger imports 66+. Dedicated imports 44+. Same structure, different component sets — each brand uses the Blueprint components it needs.
+
+### When to add a new default
+
+You add a new entry to the aggregate whenever you start using a new Blueprint component on a client. The flow is:
+
+1. Create `app/project/blueprint/components/<new-component>/default-props.tsx` with the typed defaults.
+2. Add an import + entry in `app/project/default-props.tsx`.
+3. Rebuild.
+
+That's it. The component registered under that name via `withManagedProps` will pick up the defaults automatically on its next render.
+
+## 6. The GrowthBook integration
 
 `src/frontend/grease/growthbook/src/grease-growthbook-managed-props-provider.tsx` is the bridge. It reads active GrowthBook features, turns flag names like `ProductCard::badges_location` into a managed-props tree, and passes it to `ManagedPropsProvider` as `deferredOverrideProps`:
 
@@ -195,7 +315,7 @@ Clients compose both sources together. From `client-frontends/stronger/app/servi
 
 `defaultProps` is the hand-written per-client theming. GrowthBook layers on top via `deferredOverrideProps`. Explicit props from pages sit in between. See [growthbook](./growthbook) for the surrounding provider setup.
 
-## 6. Delimiters
+## 7. Delimiters
 
 Two delimiters, both overridable on `GreaseGrowthbookManagedPropsProvider`:
 
@@ -208,7 +328,7 @@ So `ProductCard::badges_location` targets `ProductCard` and sets `badges.locatio
 
 Change the defaults if your component names contain `::` (unlikely) or — more commonly — if your prop names contain underscores. A prop called `image_url` gets incorrectly split into `image.url` under the default `_` delimiter. Either rename the prop to `imageUrl` (preferred, follows repo convention) or switch `propDelimiter` to something your flag keys don't use.
 
-## 7. When not to use it
+## 8. When not to use it
 
 Managed-props is for **runtime-dynamic** overrides: feature flags, A/B experiments, tenant variations that live outside the code. It has a non-trivial cost — every registered component runs through `useContext`, a flatten, a merge, and an un-flatten on every render.
 

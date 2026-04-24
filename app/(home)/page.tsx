@@ -72,7 +72,7 @@ function Hero() {
             href="/docs"
             className="underline-offset-4 transition hover:text-fd-foreground hover:underline"
           >
-            Or jump into the full index — 17 guides
+            Or jump into the full index — 23 guides
             <Arrow className="ml-1 inline h-4 w-4" />
           </Link>
         </div>
@@ -116,6 +116,37 @@ const coreFeatures: Feature[] = [
       'Login, session restore, order history, passwordless identification.',
     href: '/docs/guides/account',
     icon: <IconUser />,
+  },
+];
+
+const platform: Feature[] = [
+  {
+    title: 'Search',
+    description:
+      'One hook surface, swappable adapters (Algolia, Voyado Elevate, Centra).',
+    href: '/docs/guides/search',
+    icon: <IconSearch />,
+  },
+  {
+    title: 'Image',
+    description:
+      'CDN-agnostic URL rewriting via a processor chain — Cloudflare, Storyblok, custom.',
+    href: '/docs/guides/image',
+    icon: <IconImage />,
+  },
+  {
+    title: 'Centra Mappers',
+    description:
+      '27 default mappers, spread-and-override to attach brand-specific fields.',
+    href: '/docs/guides/centra-mappers',
+    icon: <IconLayers />,
+  },
+  {
+    title: 'SEO Routes',
+    description:
+      'sitemap.xml, robots.txt, Google feed — raw XML served through Remix loaders.',
+    href: '/docs/guides/seo-routes',
+    icon: <IconRss />,
   },
 ];
 
@@ -181,6 +212,16 @@ function WhatsInside() {
         </div>
         <div className="grid gap-px overflow-hidden rounded-xl border border-fd-border bg-fd-border sm:grid-cols-2 lg:grid-cols-4">
           {coreFeatures.map((feature) => (
+            <FeatureTile key={feature.href} feature={feature} />
+          ))}
+        </div>
+
+        <div className="mb-4 mt-10 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-fd-muted-foreground">
+          <span className="h-1.5 w-1.5 rounded-full bg-fd-foreground/80" />
+          Platform
+        </div>
+        <div className="grid gap-px overflow-hidden rounded-xl border border-fd-border bg-fd-border sm:grid-cols-2 lg:grid-cols-4">
+          {platform.map((feature) => (
             <FeatureTile key={feature.href} feature={feature} />
           ))}
         </div>
@@ -552,6 +593,36 @@ function IconTruck() {
       <path d="M14 10h4l3 3v4h-7" />
       <circle cx="7" cy="18" r="2" />
       <circle cx="17" cy="18" r="2" />
+    </IconBase>
+  );
+}
+
+function IconImage() {
+  return (
+    <IconBase>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <circle cx="9" cy="10" r="1.5" />
+      <path d="M21 16l-5-5-8 8" />
+    </IconBase>
+  );
+}
+
+function IconLayers() {
+  return (
+    <IconBase>
+      <path d="M12 3l9 5-9 5-9-5 9-5z" />
+      <path d="M3 13l9 5 9-5" />
+      <path d="M3 17l9 5 9-5" />
+    </IconBase>
+  );
+}
+
+function IconRss() {
+  return (
+    <IconBase>
+      <path d="M4 11a9 9 0 019 9" />
+      <path d="M4 5a15 15 0 0115 15" />
+      <circle cx="5.5" cy="18.5" r="1.5" />
     </IconBase>
   );
 }

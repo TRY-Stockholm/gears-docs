@@ -1,0 +1,440 @@
+---
+title: Search Architecture
+description: How grease-search swaps vendor adapters (Algolia, Voyado Elevate, Centra) behind a single hook surface — providers, query types, and the mapper pattern that keeps the UI vendor-agnostic
+---
+
+## What you'll learn
+
+How every product-list, search page, and recommendation block in a Gears client reaches search data through the same hooks — `useSearchResultItems`, `useFacets`, `useSort` — regardless of whether the data comes from Algolia, Voyado Elevate, or Centra's own search endpoints. And how to swap or extend adapters without touching a single consumer.
+
+## The four things to know
+
+1. **One core, many adapters.** `@made-people/grease-search` defines the hooks, state, and caching. Vendor packages (`grease-algolia`, `grease-voyado-elevate`, `grease-centra`) implement `SearchResultMethods` and mount a vendor-specific `*SearchResultsProvider` inside the core provider.
+2. **The adapter provides four methods.** `fetchSearchResult`, `loadPage`, `setFacets`, `setSortOrder`. Each returns a normalized `SearchResult`. That's the entire contract.
+3. **Vendor data becomes Grease `Product` via a mapper.** Same pattern as Centra mappers — `elevateProductGroupToGreaseProduct`, `algoliaHitToGreaseProduct`. Clients override the mapper to attach brand-specific attributes.
+4. **Query type is a discriminated union.** For Voyado Elevate: `landing-page`, `landing-page-recommendations`, `search-page`, `cart-page`, `product-page`. The adapter switches behavior per type, but consumers still use the same hooks.
+
+## Prerequisites
+
+- A React client with providers already stacked — `CentraProvider`, `FrontendContextProvider`, etc.
+- A search vendor chosen per brand: Algolia (Stronger, Dedicated), Voyado Elevate (Miss Mary), or Centra-native.
+- Credentials from the vendor: API keys, application IDs, Elevate client IDs.
+
+## Install
+
+```bash
+# Inside the monorepo
+rush add -p @made-people/grease-search
+rush add -p @made-people/grease-algolia   # or grease-voyado-elevate, etc.
+
+# Outside the monorepo
+pnpm add @made-people/grease-search
+pnpm add @made-people/grease-algolia
+```
+
+## 1. The two-provider pattern
+
+Every page that reads search data sits under two nested providers:
+
+```tsx
+<SearchProvider {...globalSettings}>
+  <ElevateSearchResultsProvider query={queryForThisPage}>
+    <ProductList />
+    <FacetSidebar />
+    <Pagination />
+  </ElevateSearchResultsProvider>
+</SearchProvider>
+```
+
+**Outer: `SearchProvider`** — global configuration. Items per page, URL params → facets mapping, facet sorting rules, React Query cache. Mounted once in the app shell.
+
+**Inner: `*SearchResultsProvider`** — per-query instance. Owns the current result state for one query. Mounted per page, unmounted on navigation. The `*` prefix is the vendor — `Elevate`, `Algolia`, `Centra`.
+
+Consumers (`ProductList`, facets, pagination) call hooks that read from the inner provider. Swapping vendors means swapping the inner provider — not the consumers.
+
+## 2. `SearchProvider` — the global config
+
+From `src/frontend/grease/search/src/search-provider.tsx`:
+
+```tsx
+export type SearchProviderProps = PropsWithChildren<
+  SearchContextValue & {
+    facetSorting?: SearchResultProviderFacetSorting;
+    excludedFacets?: string[];
+    facetGrouping?: FacetGroupingFunction;
+  }
+>;
+
+export const SearchProvider = (props: SearchProviderProps) => {
+  const value = {
+    globalSearchSettings: props.globalSearchSettings,
+    searchData: props.searchData,
+    structuredDataMapper: props.structuredDataMapper,
+  };
+  const facetSorting = {
+    facets: props.facetSorting?.facets ?? "auto",
+    values: props.facetSorting?.values ?? "auto",
+  };
+  const excludedFacets = props.excludedFacets ?? [];
+
+  return (
+    <searchContext.Provider value={value}>
+      <excludedFacetsContext.Provider value={excludedFacets}>
+        <facetGroupingContext.Provider value={props.facetGrouping ?? null}>
+          <facetSortingContext.Provider value={facetSorting}>
+            <SearchResultReactQueryProvider>
+              {props.children}
+            </SearchResultReactQueryProvider>
+          </facetSortingContext.Provider>
+        </facetGroupingContext.Provider>
+      </excludedFacetsContext.Provider>
+    </searchContext.Provider>
+  );
+};
+```
+
+Five contexts stacked, plus the internal React Query wrapper. Each carries one concern:
+
+| Context | Purpose |
+|---|---|
+| `searchContext` | Global settings (items per page), URL search params, pathname, structured data mapper |
+| `excludedFacetsContext` | Facets to hide from the UI (e.g. internal vendor facets) |
+| `facetGroupingContext` | Function that groups related facets ("Size" + "EU Size" → one group) |
+| `facetSortingContext` | Sort order for facet lists and facet values |
+| `SearchResultReactQueryProvider` | The React Query client that caches search responses |
+
+Configuration from Stronger (`client-frontends/stronger/app/project/bootstrap.tsx`):
+
+```tsx
+const searchProviderProps: SearchProviderProps = {
+  structuredDataMapper: greaseProductToUnformattedStructuredDataProduct,
+  globalSearchSettings: { defaultItemsPerPage: 20 },
+  searchData: {
+    urlSearchParams: searchParams,
+    pathname: location.pathname,
+  },
+};
+
+return (
+  <SearchProvider {...searchProviderProps}>
+    <ElevateBootstrap {...elevateBootstrapProps}>
+      {children}
+    </ElevateBootstrap>
+  </SearchProvider>
+);
+```
+
+## 3. The adapter provider
+
+Each vendor ships a `*SearchResultsProvider` that takes a query, builds four methods, and wraps its children in `CachedSearchResultsProvider`.
+
+From `src/frontend/grease/voyado-elevate/src/components/elevate-search-results-provider.tsx`:
+
+```tsx
+export const ElevateSearchResultsProvider = withManagedProps(
+  "ElevateSearchResultsProvider",
+  withZod(
+    elevateSearchResultsProviderSchema,
+    (props: ElevateSearchResultsProviderProps) => {
+      const { body, initialParams } = useElevateInitialParams(props.query);
+      const setFacets = useElevateSetFacets(body, initialParams, props.query.type);
+      const loadPage = useElevateLoadPage(body, initialParams, props.query.type);
+      const fetchSearchResult = useElevateFetchSearchResult();
+
+      const queryParams = useMemo(
+        () => ({ body, initialParams, type: props.query.type }),
+        [body, initialParams, props.query.type],
+      );
+
+      const searchMethods: SearchResultMethods = useMemo(
+        () => ({
+          fetchSearchResult: async () =>
+            fetchSearchResult(initialParams, body, props.query.type),
+          loadPage,
+          setFacets,
+          setSortOrder: () => Promise.resolve(emptySearchResult),
+        }),
+        [fetchSearchResult, initialParams, body, props.query.type, loadPage, setFacets],
+      );
+
+      return (
+        <CachedSearchResultsProvider
+          queryParams={queryParams}
+          searchMethods={searchMethods}
+        >
+          {props.children}
+        </CachedSearchResultsProvider>
+      );
+    },
+  ),
+);
+```
+
+Three things to notice:
+
+1. **The adapter is a `withManagedProps` component.** Clients can override its props via the managed-props tree — see [withManagedProps](./with-managed-props).
+2. **Each method is a hook.** `useElevateLoadPage`, `useElevateSetFacets` — they close over the current body/params and return functions the core can call.
+3. **`setSortOrder` is a no-op for Elevate.** Elevate's sort is configured in Vision, not passed at query time. Algolia's adapter would implement it for real.
+
+## 4. The `SearchResultMethods` contract
+
+Every adapter implements these four methods:
+
+```ts
+export type SearchResultMethods = {
+  fetchSearchResult: () => Promise<SearchResult>;
+  loadPage: (
+    page: number,
+    currentSearchResult: SearchResult | undefined,
+  ) => Promise<SearchResultItem[]>;
+  setFacets: (
+    newFacets: SearchResultFacet[],
+    currentSearchResult: SearchResult | undefined,
+  ) => Promise<SearchResult>;
+  setSortOrder: (
+    sort: SearchResultSort,
+    currentSearchResult: SearchResult | undefined,
+  ) => Promise<SearchResult>;
+};
+```
+
+| Method | Called when |
+|---|---|
+| `fetchSearchResult` | Initial mount of the provider |
+| `loadPage` | User clicks "load more" or a numbered page — returns *just the new items* to append |
+| `setFacets` | User toggles a facet — returns a full new `SearchResult` |
+| `setSortOrder` | User changes sort order — returns a full new `SearchResult` |
+
+The core provider (`CachedSearchResultsProvider`) owns the state — the reducer, the cache keys, the structured-data emission. The adapter owns the transport — API calls, URL building, response mapping.
+
+## 5. Query types (Voyado Elevate example)
+
+Elevate exposes five query types via a Zod discriminated union — each represents a different Elevate endpoint:
+
+| `type` | Elevate endpoint | Use case |
+|---|---|---|
+| `landing-page` | Landing Page | Category pages / brand pages |
+| `landing-page-recommendations` | Landing Page (recommendations focus) | Sub-section of a landing page |
+| `search-page` | Search Page | Text-query search results |
+| `cart-page` | Cart Page | Upsells / recommendations in cart |
+| `product-page` | Product Page | PDP recommendations |
+
+```ts
+export const elevateSearchResultQuery = z.union([
+  z.object({ type: z.literal("landing-page"), payload: z.custom<ElevateLandingPageProps>() }),
+  z.object({ type: z.literal("landing-page-recommendations"), payload: z.custom<ElevateLandingPageProps>() }),
+  z.object({ type: z.literal("search-page"), payload: z.custom<ElevateSearchPageProps>() }),
+  z.object({ type: z.literal("cart-page"), payload: z.custom<ElevateCartPageProps>() }),
+  z.object({ type: z.literal("product-page"), payload: z.custom<ElevateProductPageProps>() }),
+]);
+```
+
+The adapter's internal hooks (`useElevateInitialParams`, `useElevateLoadPage`, etc.) branch on `type` to call the right Elevate endpoint. Consumers don't care — they always get a normalized `SearchResult`.
+
+## 6. The product mapper
+
+This is the other half of the adapter — turning vendor product shapes into the Grease `Product` that UI components consume.
+
+From `src/frontend/grease/voyado-elevate/src/mappers/elevate-product-group-to-grease-product.ts`:
+
+```ts
+export const elevateProductGroupToGreaseProduct = (
+  productGroup: ElevateProductGroup,
+  options: ElevateProductGroupToGreaseProductMapperOptions,
+): Product | undefined => {
+  if (productGroup.products.length === 0) return undefined;
+
+  try {
+    if (productGroup.products[0]?.variants.length === 1) {
+      return elevateProductGroupToGreaseSimpleProduct(productGroup, options);
+    }
+    return elevateProductGroupToGreaseProductWithVariants(productGroup, options);
+  } catch (error) {
+    console.warn(
+      `elevateProductGroupToGreaseProduct: Error when converting productGroup to Grease product`,
+      { error, productGroup, options },
+    );
+    return undefined;
+  }
+};
+```
+
+Two branches — simple product (one variant) vs variant product (multiple variants). Both produce a `Product` with the same shape that `CentraProvider` would produce. That's why the PDP, PLP, and cart can render Elevate products without knowing where they came from.
+
+### Overriding the mapper
+
+Clients wrap the default mapper to add brand-specific fields. From `client-frontends/stronger/app/project/elevate-bootstrap.tsx`:
+
+```tsx
+import { elevateProductGroupToGreaseProductStronger } from
+  "./mappers/elevate/elevate-product-group-to-grease-product-stronger";
+
+const mappers = {
+  elevateProductGroupToGreaseProduct: (productGroup: ProductGroup) =>
+    elevateProductGroupToGreaseProductStronger(
+      productGroup,
+      props.elevateMapperOptions,
+    ),
+};
+
+return (
+  <ElevateProvider
+    mappers={mappers}
+    productQueryOptions={productQueryOptions}
+    elevateClientDataGetter={elevateClientDataGetter}
+  >
+    <VoyadoAutoCompleteProvider>{props.children}</VoyadoAutoCompleteProvider>
+  </ElevateProvider>
+);
+```
+
+Same pattern as Centra mappers — wrap the default, attach brand-specific attributes (Algolia object IDs, bundle flags, price formatting), return the shape Grease expects.
+
+## 7. `ElevateProvider` — adapter configuration
+
+Voyado Elevate has a third provider for vendor-level config — mappers, query defaults, client data:
+
+From `src/frontend/grease/voyado-elevate/src/context/elevate-provider.tsx`:
+
+```tsx
+export type ElevateProviderProps = PropsWithChildren<{
+  productQueryOptions?: ProductQueryOptions;
+  mappers: ElevateMappers;
+  elevateClientDataGetter: ElevateClientDataGetter;
+}>;
+
+export const ElevateProvider = (props: ElevateProviderProps) => (
+  <elevateMappersContext.Provider value={props.mappers}>
+    <elevateClientDataGetterContext.Provider value={props.elevateClientDataGetter}>
+      <elevateProductQueryOptionsContext.Provider value={props.productQueryOptions}>
+        <ElevateNotifications />
+        {props.children}
+      </elevateProductQueryOptionsContext.Provider>
+    </elevateClientDataGetterContext.Provider>
+  </elevateMappersContext.Provider>
+);
+```
+
+Three contexts:
+
+- `mappers` — product-group → Grease product mapper
+- `elevateClientDataGetter` — returns market / language / pricelist for the current request
+- `productQueryOptions` — Elevate-specific defaults (`presentPrices`, `presentCustom`, `productRules`, `stores`)
+
+Stronger's config (`client-frontends/stronger/app/project/elevate-bootstrap.tsx`):
+
+```tsx
+const productQueryOptions: ProductQueryOptions = {
+  presentPrices: [`${props.market}-${props.pricelist}`],
+  presentCustom: [
+    "excerpt",
+    "productType",
+    "variant.item",
+    "isBundle",
+    "subHeadline",
+    "productTag",
+    "category_ids",
+  ],
+  stores: props.market,
+  productRules: [
+    {
+      type: "include",
+      field: "custom.centra_markets",
+      value: props.market,
+    },
+  ],
+};
+```
+
+`presentCustom` lists which Elevate custom fields the mapper needs access to. If you add a new attribute to the mapper, add it here too — otherwise Elevate won't return it.
+
+## 8. Consumer hooks
+
+The entire consumer surface:
+
+| Hook | Returns |
+|---|---|
+| `useSearchResultState()` | Full reducer state — items, facets, sort, loading, error |
+| `useSearchResultItems()` | Just the current page's items (most common) |
+| `useSearchResultLoadMore()` | Fn to load the next page, appending to items |
+| `useSearchResultLoadPage()` | Fn to jump to a specific page |
+| `useFacets()` | `{ facets, toggleFacet, resetFacets, activeFacetValues }` |
+| `useSort()` | `{ sort, availableSorts, setSort }` |
+| `useCurrentPaginationPage()` | Current 1-based page number |
+| `usePageIncrementHref()` | Build SSR-friendly pagination links |
+| `useCachedSearchResults()` | Raw React Query handle — for advanced cache inspection |
+
+Example PLP (abridged):
+
+```tsx
+export const ProductListingPage = () => {
+  const { items, isLoading } = useSearchResultItems();
+  const { facets, toggleFacet } = useFacets();
+  const { sort, availableSorts, setSort } = useSort();
+
+  if (isLoading) return <ProductListingSkeleton />;
+
+  return (
+    <Layout>
+      <FacetSidebar facets={facets} onToggle={toggleFacet} />
+      <SortControl sort={sort} options={availableSorts} onChange={setSort} />
+      <ProductGrid items={items} />
+      <Pagination />
+    </Layout>
+  );
+};
+```
+
+This component renders under Algolia, under Elevate, under Centra. The adapter changes; the component doesn't.
+
+## 9. Adding a new adapter
+
+To plug a new search vendor in:
+
+1. **Build a `*SearchResultsProvider`** that implements `SearchResultMethods`. Model it on `ElevateSearchResultsProvider` or `AlgoliaSearchResultsProvider`.
+2. **Write the product mapper** — `vendorHitToGreaseProduct(hit, options): Product`. Pure function, throws on unmappable input, returns `undefined` on empty.
+3. **Expose `ProductQueryOptions`** — any vendor-level config the adapter needs access to via context.
+4. **Ship a `VendorProvider`** wrapping `mappers` + `clientDataGetter` + `queryOptions` contexts. This is the vendor-specific config layer — separate from the per-query `*SearchResultsProvider`.
+5. **Document query types.** If your vendor has page-type endpoints (like Elevate), model them as a Zod discriminated union. If it has one endpoint (like Algolia), skip this.
+
+Mount in the client:
+
+```tsx
+<SearchProvider {...globalSearchSettings}>
+  <VendorProvider {...vendorConfig}>
+    <VendorSearchResultsProvider query={queryForThisPage}>
+      {children}
+    </VendorSearchResultsProvider>
+  </VendorProvider>
+</SearchProvider>
+```
+
+## Gotchas
+
+- **Provider order matters.** `SearchProvider` must wrap the adapter provider. The adapter provider must wrap consumers. Swapping the order silently breaks `useSearchResultState` (returns undefined).
+- **Query object identity matters.** `ElevateSearchResultsProvider`'s memos depend on `props.query`. If you build the query inside the render without `useMemo`, every render creates a new object and the adapter re-fetches. Build query once, pass stable reference.
+- **`presentCustom` is the Elevate trap.** You add a field to the mapper, it returns undefined at runtime. The field isn't in `presentCustom`. Elevate didn't send it. Five minutes of confusion every time.
+- **`emptySearchResult` is the empty sentinel.** Use it for placeholder returns in hooks that don't apply (like Elevate's `setSortOrder`). Don't return `null` — the reducer expects the `SearchResult` shape.
+- **Adapter mappers can swallow errors.** `elevateProductGroupToGreaseProduct` catches and warns rather than throwing. Nice for availability, confusing when a PLP is missing items — check the browser console for the warn messages.
+- **`withManagedProps` on the adapter means clients can null it out.** Listing `ElevateSearchResultsProvider` in `deferredComponentNames` makes the PLP render blank until GrowthBook resolves. Usually desirable; occasionally surprising.
+
+## Troubleshooting
+
+**PLP is empty but network shows a successful response** — the product mapper returned `undefined` for every item. Open the console, look for `elevateProductGroupToGreaseProduct: Error when converting productGroup` warnings. Usually a missing required field on the vendor shape.
+
+**Facets appear but don't filter anything** — `setFacets` in the adapter didn't pass the new facet list into the vendor API call. Check the adapter's `useSetFacets` hook and confirm `initialParams` is rebuilt correctly.
+
+**"load more" returns the same page** — the adapter's `loadPage` is ignoring the page number and re-fetching page 1. Check the URL it builds — it should include the requested page number.
+
+**`useSearchResultState` returns undefined** — you called the hook outside the `*SearchResultsProvider`. Move the component inside, or wrap it with the provider.
+
+**Algolia and Elevate results look different in the same layout** — your mapper is emitting different shapes. Log both products side-by-side and diff. Usually `extraAttributes` or `media.images[0]`.
+
+## Related
+
+- [Implementing Algolia](./algolia) — the Algolia adapter setup
+- [Centra Mappers](./centra-mappers) — the same mapper override pattern, for a different data source
+- [withManagedProps](./with-managed-props) — how adapter providers opt into runtime props
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — where search providers sit in the stack
+
+**Next:** [Centra Mappers](./centra-mappers) · [Image](./image) · [SEO Routes](./seo-routes)
