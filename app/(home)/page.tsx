@@ -29,7 +29,7 @@ function Hero() {
 
       <div className="mx-auto flex max-w-4xl flex-col items-center text-center">
         <span className="mb-6 inline-flex items-center rounded-full border border-fd-border bg-fd-muted/50 px-3 py-1 text-xs font-medium text-fd-muted-foreground">
-          Made People · React toolkit for Centra
+          TRY Stockholm · React toolkit for Centra
         </span>
 
         <h1 className="max-w-3xl text-balance text-4xl font-semibold tracking-tight md:text-6xl">
@@ -430,7 +430,7 @@ function Footer() {
     <section className="px-6 py-16">
       <div className="mx-auto flex max-w-6xl flex-col gap-6 text-sm text-fd-muted-foreground md:flex-row md:items-center md:justify-between">
         <div>
-          Built by <span className="font-medium text-fd-foreground">Made People</span> ·
+          Built by <span className="font-medium text-fd-foreground">TRY Stockholm</span> ·
           Docs by TRY Stockholm
         </div>
         <div className="flex flex-wrap gap-x-6 gap-y-2">

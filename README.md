@@ -1,6 +1,6 @@
 # Gears Docs
 
-Implementation guides for Made People's Gears packages, optimized for consumption by AI coding assistants working on client projects outside the monorepo.
+Implementation guides for TRY Stockholm's Gears packages (originally Made People, before the agency joined TRY), optimized for consumption by AI coding assistants working on client projects outside the monorepo.
 
 Deployed: TBD (Vercel).
 
