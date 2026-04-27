@@ -62,3 +62,11 @@ export function CapabilityCard(props: CapabilityCardProps): ReactNode {
     </div>
   );
 }
+
+export function CapabilityGrid({ children }: { children: ReactNode }): ReactNode {
+  return (
+    <div className="my-6 grid gap-4 not-prose md:grid-cols-2 lg:grid-cols-3">
+      {children}
+    </div>
+  );
+}
