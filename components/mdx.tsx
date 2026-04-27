@@ -1,9 +1,12 @@
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import type { MDXComponents } from 'mdx/types';
+import { CapabilityCard, CapabilityGrid } from './capability-card';
 
 export function getMDXComponents(components?: MDXComponents) {
   return {
     ...defaultMdxComponents,
+    CapabilityCard,
+    CapabilityGrid,
     ...components,
   } satisfies MDXComponents;
 }
