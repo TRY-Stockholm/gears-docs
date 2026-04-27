@@ -36,7 +36,7 @@ This complements the existing home page, which orients users to the toolkit. The
 - 🟢 **Commerce backend** — Centra → `/docs/guides/centra`
 - 🟢 **Payments** — Adyen, Klarna, Qliro (via Centra checkout) → `/docs/guides/checkout`
 - 🟢 **Shipping** — Ingrid → `/docs/guides/ingrid`
-- 🟡 **Tax** — Centra-driven, no Gears layer
+- ⚪ **Tax** — Centra-handled, no Gears layer
 - ⚪ **Returns / RMA** — no Gears integration today
 
 ### Retention & loyalty
@@ -59,10 +59,9 @@ This complements the existing home page, which orients users to the toolkit. The
 | Badge | Label | Means |
 |---|---|---|
 | 🟢 | **Integrated** | Gears ships a packaged provider/hook + docs guide. Card links to the guide. |
-| 🟡 | **Pattern exists** | At least one live client has wired it up; reusable approach but no shared package. Card links to a short note (or BFF guide where applicable). |
 | ⚪ | **Not yet** | Recognized capability with no Gears story today. No CTA — just the description. |
 
-The three states are visually distinct (green / amber / grey) so a scan tells the reader the answer at a glance.
+A third state — **Pattern exists** (amber) — is reserved in the component (`CapabilityStatus = 'integrated' | 'pattern' | 'none'`) for future use when a live client has wired a capability without a shared package. v1 ships without any Pattern cards because the only candidate (Tax) turned out to be Centra-handled rather than a real client-side pattern; reintroduce the badge when there's a concrete reusable example.
 
 ## Page structure
 

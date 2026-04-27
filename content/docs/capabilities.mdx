@@ -1,11 +1,11 @@
 ---
 title: Capabilities
-description: What Gears ships out of the box, what clients have built as patterns, and what you'd add yourself — by capability rather than by package.
+description: What Gears ships out of the box and what you'd add yourself — by capability rather than by package.
 ---
 
 Gears is a stack with headroom. The packaged integrations cover most of what a modern Centra storefront needs; everything else is reachable through the BFF or the same provider patterns the existing packages use.
 
-This page is the map. Cards are tagged **Integrated** when Gears ships a packaged provider and a guide, **Pattern exists** when at least one live client has wired it up without a shared package, and **Not yet** when the capability is recognized but unaddressed today.
+This page is the map. Cards are tagged **Integrated** when Gears ships a packaged provider and a guide, and **Not yet** when the capability is recognized but unaddressed today. Six live storefronts run on this stack, so anything marked Integrated is real production code, not a demo.
 
 ## Storefront experience
 
@@ -71,8 +71,8 @@ This page is the map. Cards are tagged **Integrated** when Gears ships a package
   />
   <CapabilityCard
     title="Tax"
-    status="pattern"
-    description="Calculated by Centra per market. No Gears layer — clients configure tax rates inside Centra, not in code."
+    status="none"
+    description="Calculated by Centra per market — no Gears layer needed. Clients configure tax rates inside the Centra dashboard, not in code."
   />
   <CapabilityCard
     title="Returns / RMA"
