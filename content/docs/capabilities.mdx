@@ -1,0 +1,46 @@
+---
+title: Capabilities
+description: What Gears ships out of the box, what clients have built as patterns, and what you'd add yourself — by capability rather than by package.
+---
+
+Gears is a stack with headroom. The packaged integrations cover most of what a modern Centra storefront needs; everything else is reachable through the BFF or the same provider patterns the existing packages use.
+
+This page is the map. Cards are tagged **Integrated** when Gears ships a packaged provider and a guide, **Pattern exists** when at least one live client has wired it up without a shared package, and **Not yet** when the capability is recognized but unaddressed today.
+
+## Storefront experience
+
+<CapabilityGrid>
+  <CapabilityCard
+    title="Search"
+    status="integrated"
+    description="Faceted product search and PLP results with swappable vendor adapters behind a single hook surface."
+    vendors={['Algolia', 'Voyado Elevate', 'Centra-native']}
+    href="/docs/guides/search"
+  />
+  <CapabilityCard
+    title="Product recommendations"
+    status="integrated"
+    description="PDP, cart, and landing-page recommendations driven by Voyado Elevate query types."
+    vendors={['Voyado Elevate']}
+    href="/docs/guides/search"
+  />
+  <CapabilityCard
+    title="CMS"
+    status="integrated"
+    description="Headless content with live preview, component transformers, and per-market localization."
+    vendors={['Storyblok']}
+    href="/docs/guides/storyblok"
+  />
+  <CapabilityCard
+    title="Image CDN"
+    status="integrated"
+    description="CDN-agnostic image URL rewriting via a processor chain — plug in a new CDN without touching components."
+    vendors={['Cloudflare', 'Storyblok pass-through']}
+    href="/docs/guides/image"
+  />
+  <CapabilityCard
+    title="Reviews"
+    status="none"
+    description="Common request, no Gears integration today. Bring your own (Yotpo, Trustpilot, Reviews.io) and call it from Blueprint components directly."
+  />
+</CapabilityGrid>
