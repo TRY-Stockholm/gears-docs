@@ -44,3 +44,39 @@ This page is the map. Cards are tagged **Integrated** when Gears ships a package
     description="Common request, no Gears integration today. Bring your own (Yotpo, Trustpilot, Reviews.io) and call it from Blueprint components directly."
   />
 </CapabilityGrid>
+
+## Conversion
+
+<CapabilityGrid>
+  <CapabilityCard
+    title="Commerce backend"
+    status="integrated"
+    description="Cart, checkout, orders, customers, products. The required foundation."
+    vendors={['Centra']}
+    href="/docs/guides/centra"
+  />
+  <CapabilityCard
+    title="Payments"
+    status="integrated"
+    description="PSP-pluggable checkout flow. Drivers ship for the major regional providers; new ones plug in via the same interface."
+    vendors={['Adyen', 'Klarna', 'Qliro']}
+    href="/docs/guides/checkout"
+  />
+  <CapabilityCard
+    title="Shipping"
+    status="integrated"
+    description="Embedded shipping widget for delivery options, pickup points, and home delivery."
+    vendors={['Ingrid']}
+    href="/docs/guides/ingrid"
+  />
+  <CapabilityCard
+    title="Tax"
+    status="pattern"
+    description="Calculated by Centra per market. No Gears layer — clients configure tax rates inside Centra, not in code."
+  />
+  <CapabilityCard
+    title="Returns / RMA"
+    status="none"
+    description="No Gears integration today. Order status surfaces in the account guide; an RMA portal would be a custom build."
+  />
+</CapabilityGrid>
