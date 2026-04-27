@@ -116,3 +116,45 @@ This page is the map. Cards are tagged **Integrated** when Gears ships a package
     description="No Gears integration today."
   />
 </CapabilityGrid>
+
+## Operations
+
+<CapabilityGrid>
+  <CapabilityCard
+    title="Feature flags & experiments"
+    status="integrated"
+    description="Server-resolved flags and A/B experiments wired into the managed-props layer for runtime overrides."
+    vendors={['GrowthBook']}
+    href="/docs/guides/growthbook"
+  />
+  <CapabilityCard
+    title="Analytics"
+    status="integrated"
+    description="Ecommerce events, cart and checkout tracking, server-tagged page views."
+    vendors={['Google Tag Manager']}
+    href="/docs/guides/gtm"
+  />
+  <CapabilityCard
+    title="SEO"
+    status="integrated"
+    description="sitemap.xml, robots.txt, and the Google product feed served as raw XML through Remix loaders."
+    href="/docs/guides/seo-routes"
+  />
+  <CapabilityCard
+    title="withManagedProps theming"
+    status="integrated"
+    description="Per-client default-props layer that lets each brand skin Blueprint components without forking."
+    href="/docs/guides/with-managed-props"
+  />
+</CapabilityGrid>
+
+---
+
+## Don't see what you need?
+
+Two extension paths handle anything not on this map:
+
+- **The BFF** is the place for new server-side data sources, vendor proxying, and webhook endpoints. See [The BFF](/docs/guides/bff) for the architecture and how to add an endpoint.
+- **A new Blueprint package** is the place for new UI surfaces that aren't already covered. See [Build a Blueprint component](/docs/guides/build-a-blueprint-component) for the generator and conventions.
+
+If a capability you need isn't here and feels like it should be packaged for everyone, open an issue on the monorepo.
