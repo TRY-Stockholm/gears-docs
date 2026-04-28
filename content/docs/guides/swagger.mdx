@@ -1,0 +1,304 @@
+---
+title: Swagger / OpenAPI
+description: How every Gears NestJS service auto-mounts a Swagger UI at /api — what generates it, how DTOs and decorators map to the spec, and how to extend or scope the visible surface
+---
+
+## What you'll learn
+
+How every NestJS service in the monorepo (the BFF, Algolia, Voyado Engage, Storyblok module, Yotpo, Recrql, the config service, and a handful more) automatically exposes an interactive Swagger UI at `/api`, and how the same DTO classes that power runtime validation also power the OpenAPI schema you click through in that UI.
+
+## The four things to know
+
+1. **Swagger is centralized in `gears-nestjs-core`.** The single function `createGearsApp` in `@made-people/gears-nestjs-core` calls `SwaggerModule.setup("api", ...)` for you. Every service that bootstraps with `createGearsApp(MyAppModule)` gets `/api` for free — no per-service wiring.
+2. **DTOs do double duty.** `@ApiProperty()` on a class field tells Swagger about the schema; `@IsString()`/`@IsNumber()`/`@IsEmail()` from `class-validator` on the same field enforces it at runtime via the global `ValidationPipe`. Write the field once, get docs and validation.
+3. **Controllers don't need decoration to appear.** Any `@Get`/`@Post`/etc. handler shows up in `/api` automatically. Decorators like `@ApiTags`, `@ApiOperation`, `@ApiHeader` are for grouping and prose — useful but optional.
+4. **The UI is interactive in production.** `tryItOutEnabled: true`. You can hit endpoints from the browser. Use admin-key gating (the same auth your service uses) — don't assume the UI is only seen internally.
+
+## Prerequisites
+
+- A NestJS service in the monorepo using `@made-people/gears-nestjs-core` (every service does).
+- Familiarity with NestJS decorators (`@Controller`, `@Get`, `@Post`).
+- For DTOs: `class-validator` decorators if you want validated input.
+
+## Install
+
+You don't install Swagger directly. It comes in via `gears-nestjs-core`. New services that scaffold from the existing pattern get it automatically. If you're adding decorators to an existing controller:
+
+```bash
+# Inside the monorepo
+rush add -p @nestjs/swagger -p class-validator
+```
+
+`@nestjs/swagger` is already in the dependency closure of every service via `gears-nestjs-core`; explicit installation is only needed if you want the IDE imports to resolve cleanly in a service where it's currently transitive.
+
+## 1. Where Swagger lives
+
+Every Gears NestJS service exposes its Swagger UI at the path `/api`, served by the same Fastify instance as the rest of the service. So:
+
+- BFF (typically `:8080`) → `http://localhost:8080/api`
+- Algolia service → `http://localhost:8081/api` (or wherever it runs)
+- Voyado Engage service → same shape
+- All eight services with a `main.ts` follow the same pattern.
+
+The raw OpenAPI JSON is at `/api-json`. Useful for codegen, client-side schema introspection, or feeding into Postman.
+
+In production, every service's `/api` endpoint is reachable behind the same domain that serves its API endpoints. Treat it as part of the public surface area: if the API endpoints are admin-gated, the UI tries to hit them, so the UI itself respects that gating naturally.
+
+## 2. `createGearsApp` — the auto-setup
+
+From `src/services/nestjs/nestjs-core-module/src/create-gears-app.ts`:
+
+```ts
+import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
+
+export async function createGearsApp(
+  appModule: any,
+  appOptions?: NestApplicationOptions,
+  fastifyCorsOptions?: FastifyCorsOptions,
+): Promise<NestFastifyApplication> {
+  const app = await NestFactory.create<NestFastifyApplication>(
+    appModule,
+    new FastifyAdapter(),
+    { bufferLogs: true, rawBody: true, ...appOptions },
+  );
+
+  // ... logger, exception filter, CORS ...
+
+  const config = new DocumentBuilder()
+    .setTitle(process.env.npm_package_name)
+    .setDescription(process.env.npm_package_description)
+    .setVersion(process.env.npm_package_version)
+    .build();
+
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup("api", app, document, {
+    swaggerOptions: { tryItOutEnabled: true },
+    customCssUrl: "https://cdnjs.cloudflare.com/.../swagger-ui.min.css",
+    customJs: [
+      "https://cdnjs.cloudflare.com/.../swagger-ui-bundle.js",
+      "https://cdnjs.cloudflare.com/.../swagger-ui-standalone-preset.js",
+    ],
+  });
+
+  app.useGlobalPipes(new ValidationPipe());
+
+  return app;
+}
+```
+
+Three things this gets right that you'd otherwise get wrong per service:
+
+- **Title, description, and version come from `package.json`.** No hardcoding. Every service inherits the correct branding from its own package metadata.
+- **`tryItOutEnabled`** wires the "Try it out" button. Without this, Swagger renders read-only.
+- **`ValidationPipe` is global.** Anything tagged with `class-validator` decorators on a DTO is enforced at request boundary, returning 400 with a human-readable message on bad input. The `@ApiProperty` schema and the `class-validator` enforcement stay in lockstep.
+
+The bootstrap from a service's `main.ts` is exactly:
+
+```ts
+import { createGearsApp } from "@made-people/gears-nestjs-core";
+
+async function bootstrap() {
+  const { BffModule } = await import("./bff.module");
+  const app = await createGearsApp(BffModule);
+  await app.listen(process.env.PORT ?? 8080, "0.0.0.0");
+}
+
+bootstrap();
+```
+
+That's the entire setup. New services follow the same shape.
+
+## 3. DTOs — the dual schema/validation pattern
+
+This is the core idea: one class, two purposes. From `src/services/nestjs/nestjs-bff-service/src/controllers/v1/dto/find-countries-and-languages-response.ts`:
+
+```ts
+import { ApiProperty } from "@nestjs/swagger";
+import { IsString } from "class-validator";
+
+export class CountrySelectorCountryModelV1 {
+  @ApiProperty()
+  @IsString()
+  public countryCode!: string;
+
+  @ApiProperty()
+  @IsString()
+  public name!: string;
+
+  @ApiProperty()
+  @IsString()
+  public languageCode!: string;
+
+  @ApiProperty()
+  @IsString()
+  public marketId!: string;
+
+  @ApiProperty({ type: ShippableStatesModelV1, isArray: true })
+  public states!: ShippableStatesModelV1[];
+}
+```
+
+Two decorator stacks on every field:
+
+- **`@ApiProperty()` →** describes the field in the OpenAPI schema. Swagger UI renders it as a typed entry. Pass options like `description`, `example`, `enum`, `required`, `type` (for nested classes), `isArray`, `nullable` to refine.
+- **`@IsString()` / `@IsNumber()` / `@IsEmail()` / `@IsEnum()` / etc. →** enforces the type at runtime. If a request body fails validation, NestJS returns 400 with a structured error array — you don't write the validation code.
+
+For nested types or arrays, pass `type` to `@ApiProperty`:
+
+```ts
+@ApiProperty({ type: ShippableStatesModelV1, isArray: true })
+public states!: ShippableStatesModelV1[];
+```
+
+`@nestjs/swagger`'s reflection cannot infer generic array element types from TypeScript alone, so passing `type:` is required for arrays of complex shapes.
+
+For unions, `oneOf` works:
+
+```ts
+@ApiProperty({
+  oneOf: [
+    { $ref: getSchemaPath(SuccessResponseV1) },
+    { $ref: getSchemaPath(ErrorResponseV1) },
+  ],
+})
+public result!: SuccessResponseV1 | ErrorResponseV1;
+```
+
+## 4. Controller decorators — when and which
+
+Bare controllers work, but adding decorators makes the docs scannable:
+
+```ts
+import { ApiTags, ApiOperation, ApiResponse } from "@nestjs/swagger";
+
+@ApiTags("Algolia Feeds")
+@ApiTenantHeader
+@Controller(ADMIN_FEED_CONTROLLER_PREFIX)
+export class AlgoliaFeedsController {
+  @Get("/products/:siteSlug")
+  @ApiOperation({ summary: "Generate the Algolia product feed for a site" })
+  @ApiResponse({ status: 200, type: ProductFeedResponseV1 })
+  public async generate(
+    @Param("siteSlug") siteSlug: string,
+  ): Promise<ProductFeedResponseV1> {
+    return this.feedService.generate(siteSlug);
+  }
+}
+```
+
+What each one does:
+
+| Decorator | Purpose | Applies to |
+|---|---|---|
+| `@ApiTags("Group Name")` | Groups endpoints under a collapsible header in the UI. Without it, Swagger groups by controller class name. | Controller class |
+| `@ApiOperation({ summary, description })` | Adds a one-liner above the endpoint and a longer description below. | Method |
+| `@ApiResponse({ status, type, description })` | Documents the response shape per status code. The class passed to `type` must be `@ApiProperty`-annotated. | Method |
+| `@ApiBody({ type })` | Documents the request body schema explicitly. Usually inferred from typed parameters; use this when the body type isn't declared in code. | Method |
+| `@ApiQuery({ name, type, required })` | Documents a query parameter not declared as a typed `@Query()` param. | Method |
+| `@ApiHeader({ name, description })` | Documents a custom request header. | Method or controller class |
+
+### `ApiTenantHeader` — a Gears custom
+
+The monorepo ships a domain-specific decorator that wraps `@ApiHeader` for the multi-tenant header. From `src/services/nestjs/nestjs-core-module/src/tenancy/lib/decorator.ts`:
+
+```ts
+import { ApiHeader } from "@nestjs/swagger";
+import { tenantHeader } from "./tenant-constant";
+
+export const ApiTenantHeader = ApiHeader({
+  name: tenantHeader,
+  description: "Current application tenant id",
+});
+```
+
+Apply it to any controller or method whose endpoint is tenant-scoped:
+
+```ts
+@ApiTags("Algolia Feeds")
+@ApiTenantHeader
+@Controller(...)
+export class AlgoliaFeedsController { /* ... */ }
+```
+
+Swagger UI then renders an editable `x-tenant-id` field at the top of every endpoint, so you can try-it-out without crafting the header manually.
+
+## 5. Production behavior — CDN-loaded UI assets
+
+Notice the `customCssUrl` and `customJs` config in `createGearsApp`:
+
+```ts
+customCssUrl:
+  "https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.18.2/swagger-ui.min.css",
+customJs: [
+  "https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.18.2/swagger-ui-bundle.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.18.2/swagger-ui-standalone-preset.js",
+],
+```
+
+This loads the Swagger UI assets from a public CDN rather than serving them locally. The setup comment in `create-gears-app.ts` notes this works around production builds that don't pick up the bundled swagger-ui assets — it's a deliberate workaround, not an accident.
+
+Practical implications:
+
+- **No CSP exception needed for fonts/CSS** beyond `cdnjs.cloudflare.com`. If your service has a strict CSP, allow that origin for `style-src` and `script-src` or the UI renders blank.
+- **Pinned to swagger-ui 5.18.2.** When the upstream swagger-ui ships a major version, the URLs in `create-gears-app.ts` need to be updated. (Centralized, so it's a one-line PR.)
+- **Air-gapped environments will break Swagger UI.** Endpoints still serve their JSON at `/api-json`, but the visual UI requires the CDN. If you deploy to a network without `cdnjs.cloudflare.com` reachable, swap the customCss/customJs config for self-hosted assets.
+
+## 6. Services that ship with Swagger
+
+Every service whose `main.ts` calls `createGearsApp` exposes `/api`. Today:
+
+| Service | Package | What's interesting in its Swagger |
+|---|---|---|
+| BFF | `nestjs-bff-service` | The biggest surface — frontend context, sitemaps, page resolution, search proxies, ecomid sessions |
+| Algolia | `nestjs-algolia-service` | Admin feed generators (`/admin/feeds/...`), search proxy endpoints |
+| Voyado Engage | `nestjs-voyado-engage` | Customer identification, newsletter, promotions, vouchers |
+| Yotpo | `nestjs-yotpo-service` | Reviews integration (the one Reviews integration in the monorepo today) |
+| Recrql | `nestjs-recrql-service` | Search/recommendation proxying |
+| Voyado Elevate | `voyado-elevate` | Search proxy for the Elevate adapter |
+| Config | `nestjs-config-service` | Tenant config CRUD |
+| Monorebot | `nestjs-monorebot` | Internal CI/automation surface |
+
+Eight services with a `main.ts` and Swagger today; the count grows when new services are added. Each is independently inspectable at its own `/api`.
+
+## 7. Generating typed clients
+
+The monorepo doesn't ship an automated client-codegen pipeline today. Typed clients (e.g. `@made-people/gears-bff-client`, `@made-people/voyado-engage-api-client`) are hand-rolled. The OpenAPI spec from `/api-json` is consumable by tools like `openapi-typescript` or `openapi-generator`, but no service includes a generated-client step in its build.
+
+If you want to generate a client externally:
+
+```bash
+npx openapi-typescript http://localhost:8080/api-json -o ./bff.openapi.d.ts
+```
+
+This produces a typed schema you can wrap in a fetch helper. Useful for consumers outside the monorepo who want compile-time guarantees against the BFF without depending on `@made-people/gears-bff-client`.
+
+## Gotchas
+
+- **`@ApiProperty()` is required for every field that should appear in the schema.** Missing the decorator means the field is absent from the OpenAPI spec, even though TypeScript types it. Swagger UI then renders an incomplete shape — and consumers depending on the spec see the field as missing entirely.
+- **Array-of-class fields need explicit `type:`.** TypeScript doesn't keep generic information at runtime, so `@ApiProperty()` alone on `states: State[]` produces an `array of unknown`. Always pass `{ type: State, isArray: true }` for arrays of class instances.
+- **`class-validator` decorators don't run if `ValidationPipe` isn't registered.** `createGearsApp` registers it globally. If a service bypasses `createGearsApp` (some tests do), validation silently no-ops.
+- **`tryItOutEnabled` exposes endpoints from the browser.** This is great for development. In production, ensure that admin-only endpoints are gated by middleware (`api-key-auth.middleware.ts` or similar) — otherwise anyone hitting `/api` can call them.
+- **Controllers without `@ApiTags` group by class name.** That gives you sections like "AlgoliaFeedsControllerV1" with no spaces. Add `@ApiTags("Algolia Feeds")` for human-readable groups.
+- **Production Swagger UI assets fail with strict CSP.** If your service's CSP doesn't allow `cdnjs.cloudflare.com`, the UI renders blank. Either widen the CSP or self-host the assets.
+
+## Troubleshooting
+
+**Swagger UI renders blank / no styles** — Browser CSP is blocking `cdnjs.cloudflare.com`. Add `style-src cdnjs.cloudflare.com` and `script-src cdnjs.cloudflare.com` to your service's CSP, or switch to self-hosted swagger-ui assets.
+
+**A new endpoint isn't showing up** — Make sure the controller is registered in the service's `Module` (the `controllers: [...]` array). Endpoints not connected to a registered controller never reach NestJS's metadata reflection and never appear in Swagger.
+
+**Field is in the TypeScript class but not in the schema** — `@ApiProperty()` is missing on that field. Add it.
+
+**`Try it out` works locally but 401s in prod** — That's expected if the endpoint is admin-gated. The Swagger UI doesn't auto-attach your auth header. Either paste an admin key into the `x-admin-key` field at the top of the page, or add `@ApiHeader({ name: 'x-admin-key' })` to that controller so the UI prompts for it explicitly.
+
+**OpenAPI JSON differs from runtime validation** — Some `@ApiProperty()` option contradicts a `class-validator` decorator (e.g. `@ApiProperty({ required: false })` paired with `@IsNotEmpty()`). The UI says optional, the validator says required. Reconcile: drop one of them, or align them.
+
+**Schema is missing an enum's values** — Enums must be passed via `@ApiProperty({ enum: MyEnum })`. TypeScript's structural inference doesn't capture them.
+
+## Related
+
+- [The BFF](./bff) — the biggest service that exposes Swagger; explains the surrounding architecture
+- [Implementing Centra](./centra) — many BFF endpoints proxy or transform Centra responses; their DTOs are documented via Swagger
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — the client-side counterpart, where typed clients consume these endpoints
+
+**Next:** [The BFF](./bff) · [SEO Routes](./seo-routes) · [Image](./image)

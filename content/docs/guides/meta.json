@@ -23,6 +23,7 @@
     "---Platform---",
     "image",
     "seo-routes",
+    "swagger",
     "---Patterns---",
     "blueprint",
     "build-a-blueprint-component",
