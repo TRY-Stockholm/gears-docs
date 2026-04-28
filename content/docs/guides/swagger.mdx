@@ -33,16 +33,38 @@ rush add -p @nestjs/swagger -p class-validator
 
 ## 1. Where Swagger lives
 
-Every Gears NestJS service exposes its Swagger UI at the path `/api`, served by the same Fastify instance as the rest of the service. So:
+Every Gears NestJS service exposes its Swagger UI at the path `/api`, served by the same Fastify instance as the rest of the service. The raw OpenAPI JSON is at `/api-json` — useful for codegen, schema introspection, or feeding into Postman.
 
-- BFF (typically `:8080`) → `http://localhost:8080/api`
-- Algolia service → `http://localhost:8081/api` (or wherever it runs)
-- Voyado Engage service → same shape
-- All eight services with a `main.ts` follow the same pattern.
+In production, every service's `/api` endpoint is reachable behind the same domain that serves its API endpoints. Admin endpoints stay gated by their middleware; the UI just exposes the schema and a "try it out" button.
 
-The raw OpenAPI JSON is at `/api-json`. Useful for codegen, client-side schema introspection, or feeding into Postman.
+### Live URLs
 
-In production, every service's `/api` endpoint is reachable behind the same domain that serves its API endpoints. Treat it as part of the public surface area: if the API endpoints are admin-gated, the UI tries to hit them, so the UI itself respects that gating naturally.
+The deployed URL formula for every Gears service in SaaS cluster mode is:
+
+```
+https://<tenant>.<service>.<env>.<gearsDomain>/api
+```
+
+Where `<env>` is `test` or `prod`, `<gearsDomain>` is currently `gears.madepeople.dev`, `<service>` is the service slug (`bff`, `algolia`, `yotpo`, etc.), and `<tenant>` is the kebab-less brand id (`astridlindgren`, not `astrid-lindgren`; `minirodini`, not `mini-rodini`).
+
+**BFF** — every brand, both environments:
+
+| Brand | Test | Production |
+|---|---|---|
+| Stronger | [stronger.bff.test](https://stronger.bff.test.gears.madepeople.dev/api) | [stronger.bff.prod](https://stronger.bff.prod.gears.madepeople.dev/api) |
+| Miss Mary | [miss-mary.bff.test](https://miss-mary.bff.test.gears.madepeople.dev/api) | [miss-mary.bff.prod](https://miss-mary.bff.prod.gears.madepeople.dev/api) |
+| Dedicated | [dedicated.bff.test](https://dedicated.bff.test.gears.madepeople.dev/api) | [dedicated.bff.prod](https://dedicated.bff.prod.gears.madepeople.dev/api) |
+| Astrid Lindgren | [astridlindgren.bff.test](https://astridlindgren.bff.test.gears.madepeople.dev/api) | [astridlindgren.bff.prod](https://astridlindgren.bff.prod.gears.madepeople.dev/api) |
+| Röhnisch | [rohnisch.bff.test](https://rohnisch.bff.test.gears.madepeople.dev/api) | [rohnisch.bff.prod](https://rohnisch.bff.prod.gears.madepeople.dev/api) |
+| Mini Rodini | [minirodini.bff.test](https://minirodini.bff.test.gears.madepeople.dev/api) | [minirodini.bff.prod](https://minirodini.bff.prod.gears.madepeople.dev/api) |
+
+**Algolia** — every brand, both environments. Same shape, swap `bff` for `algolia`. E.g. [stronger.algolia.test](https://stronger.algolia.test.gears.madepeople.dev/api).
+
+**Yotpo** — every brand, **test only** (not deployed to prod): [stronger.yotpo.test](https://stronger.yotpo.test.gears.madepeople.dev/api) · [miss-mary.yotpo.test](https://miss-mary.yotpo.test.gears.madepeople.dev/api) · [dedicated.yotpo.test](https://dedicated.yotpo.test.gears.madepeople.dev/api) · [astridlindgren.yotpo.test](https://astridlindgren.yotpo.test.gears.madepeople.dev/api) · [rohnisch.yotpo.test](https://rohnisch.yotpo.test.gears.madepeople.dev/api) · [minirodini.yotpo.test](https://minirodini.yotpo.test.gears.madepeople.dev/api).
+
+**Recrql, Voyado Engage, Voyado Elevate, Config** — these services ship in the monorepo but aren't all deployed for every tenant. To find your tenant's deployed services, point `getGearsServiceUrl()` from `@made-people/gears-configuration` at the service slug or open the cluster's service map.
+
+For local development, the formula switches: `https://<tenant>.<service>.local.<gearsDomain>:8080`. Set `LOCAL_SERVICES=bff,algolia` in your client's `.env` to route specific services to your local instance instead of the cluster.
 
 ## 2. `createGearsApp` — the auto-setup
 
