@@ -1,0 +1,156 @@
+---
+title: Running Services Locally (Docker)
+description: Spin up the Gears backend services on your machine with docker compose — the utility stack, trusting the self-signed SSL certificates, the local.frackend.net hostnames, and pointing a client at a service you're running yourself
+---
+
+## What you'll learn
+
+How to run the Gears backend services on your own machine with `docker compose`, how to trust the self-signed wildcard certificates so HTTPS works, how the `*.local.frackend.net` hostnames route through nginx to each service, and how to point a client frontend at a service you're running locally.
+
+> **You usually don't need this.** Most client work runs against the shared **test cluster** — copy `env-dist` to `.env` and you're done (see [Getting Started §5](./getting-started)). Reach for the local Docker stack only when you're developing a Gears **service** (the BFF, config service, Algolia, etc.) and want to run it — and its dependencies — on your machine.
+
+## The stack
+
+Everything lives under `docker-compose/` in the monorepo root, driven by `docker-compose.gears-services.yml`. Bringing it up gives you:
+
+| Container | What it is | Host port |
+|---|---|---|
+| `nginx` | TLS-terminating, tenant-aware reverse proxy — the front door for every service | `8080` |
+| `gears-bff` | The BFF service image | `8082` |
+| `gears-config-service` | Config service (plus a one-shot Prisma migration) | `8081` |
+| `postgres` | Config service database | `5432` |
+| `mongodb` | BFF storage — single-node replica set so transactions work | `27017` |
+| `redis` | BFF cache | `6379` |
+| `jaeger` | OpenTelemetry trace UI at [localhost:16686](http://localhost:16686/) | `16686` |
+
+The service images are pulled from `registry.gitlab.com/made-people/npm-monorepo/...` with `pull_policy: always`, so `up` fetches the latest build each time.
+
+## 1. Add the hosts entry
+
+Services are served on `*.local.frackend.net`, which must resolve to your machine. On most networks this already works, but some ISPs and home routers hijack unknown lookups. If so, add the entry:
+
+```bash
+sudo sh -c 'echo "\n127.0.0.1 local.frackend.net\n" >> /etc/hosts'
+```
+
+This points any `*.local.frackend.net` lookup at `127.0.0.1`.
+
+## 2. Trust the SSL certificates
+
+Every service is served over **HTTPS**, so your machine has to trust the self-signed certificates that ship in the repo. They live under `docker-compose/nginx/ssl/`, one directory per service plus a `root-ca/`.
+
+Run the setup script once:
+
+```bash
+cd docker-compose/nginx/ssl
+./setup-macos.sh
+```
+
+This adds the **root CA** and each service certificate to the macOS System keychain via `security add-trusted-cert`. You'll be prompted for your macOS password. Under the hood it trusts the root CA and then loops over `algolia bff elevate engage cs yotpo`, trusting each `cert.localpem`.
+
+> Browsers cache certificates aggressively — if HTTPS doesn't trust instantly, give it a moment or restart the browser. For Chrome you may also need:
+> ```bash
+> defaults write com.google.Chrome EnableCommonNameFallbackForLocalAnchors -bool true
+> ```
+
+### Why `.localpem` / `.localkey` and not `.pem` / `.key`
+
+GitLab's secret-push prevention blocks files ending in `.key` and `.pem` — a rule the org keeps on purpose. These certificates are for local development only and pose no security risk, so they're named `.localpem` / `.localkey` to slip past the rule while staying committed to the repo.
+
+## 3. Start the stack
+
+To run just the utility services (common when you only need the supporting infrastructure up):
+
+```bash
+docker compose -f ./docker-compose.gears-services.yml up gears-config-service
+```
+
+`depends_on` pulls in `nginx`, `postgres`, `jaeger`, and the migration job automatically. Add other services (or drop the service name to bring up everything) as needed.
+
+## 4. Service URLs and ports
+
+nginx listens on `8080` and routes by hostname to the right service. Each service also listens on its own `808x` port directly. Replace `<tenant>` with the tenant you want to act as — the subdomain becomes the `x-tenant-id` header nginx forwards downstream.
+
+| Service | Tenant-aware URL (through nginx) | Direct port |
+|---|---|---|
+| Config service | `https://<tenant>.cs.local.frackend.net:8080` | `8081` |
+| BFF | `https://<tenant>.bff.local.frackend.net:8080` | `8082` |
+| Voyado Engage | `https://<tenant>.engage.local.frackend.net:8080` | `8083` |
+| Voyado Elevate | `https://<tenant>.elevate.local.frackend.net:8080` | `8084` |
+| Algolia | `https://<tenant>.algolia.local.frackend.net:8080` | `8085` |
+| Recrql | `https://<tenant>.recrql.local.frackend.net:8080` | `8086` |
+| Yotpo | `https://<tenant>.yotpo.local.frackend.net:8080` | `8087` |
+
+A service is **only tenant-aware through nginx on `8080`** — hitting the direct `808x` port skips tenant resolution and the `x-tenant-id` header. Always go through the `.local.frackend.net:8080` hostname when you need a tenant context.
+
+## 5. Running a service yourself
+
+A common workflow is to run the supporting stack in Docker but run *one* service from source so you can edit and debug it:
+
+1. **Start the utilities** (step 3) — postgres, mongo, redis, nginx, jaeger.
+2. **Stop the containerised copy** of the service you're editing, if it's in the compose file (e.g. don't run `gears-bff` in Docker if you're running the BFF locally).
+3. **Start your service from its working directory** with the right npm command. It listens on its `808x` port.
+
+nginx proxies to `host.docker.internal:808x`, so it reaches your locally-running service exactly the same way it would the containerised one — no config change needed. You access it tenant-aware at `https://<tenant>.<service>.local.frackend.net:8080`.
+
+## 6. Point a client at your local service
+
+Once a service is running locally, tell a client frontend to use it instead of the test cluster with `LOCAL_SERVICES` in the client's `.env`:
+
+```bash
+# Route the BFF to your local instance; everything else still hits test
+LOCAL_SERVICES=bff
+GEARS_DOMAIN=frackend.net
+```
+
+The client rewrites listed services to `https://<tenant>.<service>.local.frackend.net:8080` — the exact hostnames nginx serves. Values are comma- or space-separated, and you can pin a port: `LOCAL_SERVICES=bff, engage:8087`. See [Getting Started §5](./getting-started) for the full env-var story.
+
+## 7. Generating a certificate for a new service
+
+When you add a new Gears service that needs HTTPS locally, generate its wildcard cert with the helper script:
+
+```bash
+cd docker-compose/nginx/ssl
+./create-wildcard-cert.sh <service-name>
+
+# For instance
+./create-wildcard-cert.sh storyblok
+```
+
+It creates `./<service-name>/cert.localkey`, `cert.crt`, and `cert.localpem` (a 10-year, self-signed cert chained to the local root CA), then prompts to add it to your keychain. Afterwards you must:
+
+1. **Reference it in the service's nginx config** under the `server` block:
+   ```nginx
+   ssl_certificate ssl/<service-name>/cert.localpem;
+   ssl_certificate_key ssl/<service-name>/cert.localkey;
+   ```
+2. **Add the service name to the loop in `setup-macos.sh`** so teammates trust it on first setup.
+3. **Commit the generated certificate files** to git.
+
+## Gotchas
+
+- **Skipped the cert setup.** Browsers and cURL reject the HTTPS endpoints with a trust error. Fix: run `./setup-macos.sh` from `docker-compose/nginx/ssl`.
+- **Hit the direct `808x` port and got no tenant.** Direct ports bypass nginx and the `x-tenant-id` header. Fix: use the `.local.frackend.net:8080` hostname.
+- **Ran a service in Docker *and* locally.** Both want the same port — one fails to bind, or nginx reaches the wrong one. Fix: run a given service in exactly one place.
+- **`*.local.frackend.net` doesn't resolve.** Your ISP/router is hijacking the lookup. Fix: add the `/etc/hosts` entry (step 1).
+- **New cert not trusted by a teammate.** They ran `setup-macos.sh` before your service was added to its loop. Fix: add the service name to `setup-macos.sh` and have them rerun it.
+
+## Troubleshooting
+
+**HTTPS shows a certificate warning** — The cert isn't trusted yet. Run `./setup-macos.sh`, and for Chrome try the `EnableCommonNameFallbackForLocalAnchors` default above. Restart the browser.
+
+**`Connection refused` on a `.local.frackend.net` URL** — nginx isn't up, or the service it proxies to isn't running. Check `docker compose ps` and that your locally-run service is listening on its `808x` port.
+
+**Config service won't start** — It depends on the postgres migration job (`gears-config-service-migration`) completing. Check that postgres is healthy and the migration ran to completion.
+
+**MongoDB transactions fail** — The compose file runs Mongo as a single-node replica set (`--replSet rs0`) with a healthcheck that initiates it. If transactions error, confirm the `mongodb` container is healthy (the replica set takes a few seconds to initialise on first boot).
+
+**`docker compose up` keeps pulling images** — That's `pull_policy: always` fetching the latest service build from the GitLab registry. You need to be authenticated to that registry for the pull to succeed.
+
+## Related
+
+- [Getting Started](./getting-started) — environment variables, `LOCAL_SERVICES`, and the day-to-day dev workflow
+- [The BFF](./bff) — the service you'll most often run locally; its architecture and dependencies
+- [Swagger / OpenAPI](./swagger) — once a service is up, its interactive API UI is at `/api`
+
+**Next:** [Getting Started](./getting-started) · [The BFF](./bff) · [Swagger / OpenAPI](./swagger)
