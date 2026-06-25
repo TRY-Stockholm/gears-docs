@@ -110,7 +110,7 @@ Restart the dev server. Vite/Remix picks env up at boot, not on hot reload.
 
 The **BFF** (Backend-for-Frontend) is the NestJS service every client talks to for anything that isn't the Centra checkout — page lookups, settings, product search, Storyblok content, Trustpilot, sitemaps, Google feeds. Clients reach it via `useGearsServiceUrl("bff")` + `BffClient`, using the four env vars from §5.
 
-Most client work uses the shared test BFF — you don't need to run one locally. If you do, `LOCAL_SERVICES=bff` in your client `.env` reroutes calls to it.
+Most client work uses the shared test BFF — you don't need to run one locally. If you do, `LOCAL_SERVICES=bff` in your client `.env` reroutes calls to it, and the [Running Services Locally (Docker)](./docker) guide covers bringing up the BFF and its dependencies.
 
 **See the dedicated [BFF guide](./bff) for endpoints, caching, configuration, and extension points.**
 

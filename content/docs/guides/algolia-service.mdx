@@ -1,0 +1,205 @@
+---
+title: The Algolia Service
+description: The NestJS service that turns Centra and Storyblok data into Algolia indices — what it is, how it reads products from MongoDB, its JSON-driven config, the streaming formatter pipeline, and every API endpoint
+---
+
+## What you'll learn
+
+What the Algolia service is and what it's for, how it reads product data (live from Centra or from MongoDB), how its JSON config drives everything, how the streaming formatter pipeline transforms records before upload, and every endpoint it exposes.
+
+> This is the **backend** service. For wiring Algolia search into a client frontend with `@made-people/grease-algolia`, see [Implementing Algolia](./algolia). For the per-brand outbound feed URLs, see [Product Feeds](./feeds).
+
+## What the Algolia service is
+
+`@made-people/nestjs-algolia-service` is, in its own words, a *"service that integrates Centra and Storyblok with Algolia."* It builds, transforms, and pushes data into Algolia indices so the storefront can search it.
+
+Its defining trait: **it's driven entirely by JSON config**. The README calls it "plug-and-play" — most feed changes (which attributes to index, how to shape them, which markets/languages, which index) are config edits, not code changes. A new formatter is the only thing that needs code.
+
+Why it exists:
+
+- **Centra and Storyblok don't speak Algolia.** Their record shapes are wrong for search. The service reshapes them into flat, facet-friendly index objects.
+- **Indexing is incremental.** It tracks a revision per object (`__rev`) and skips uploading anything that hasn't changed, then deletes records that disappeared.
+- **It's market- and language-aware.** One pipeline fans out into per-language or per-market-and-language indices.
+- **It hands the frontend safe credentials.** A public endpoint returns the *search-only* API key and the right index name, so the browser talks to Algolia directly — the service is **not** a search proxy.
+
+The service lives at `src/services/nestjs/nestjs-algolia-service/`.
+
+## Architecture
+
+- **NestJS + Fastify**, bootstrapped exactly like every Gears service. `src/main.ts` starts OpenTelemetry, then `createGearsApp(AppModule).listen(PORT ?? 8080)`. That's where `/api` Swagger comes from (see [Swagger / OpenAPI](./swagger)).
+- **Module graph** (`src/app.module.ts`): `ControllersModule`, `ServicesModule`, `CoreModule.register({ appKey: "algolia", driver: configDriverFactory(), validator: useZodValidator(configSchema) })`, `CentraModule.register({ configProvider: AlgoliaCentraConfigProvider })`, and `EventEmitterModule`.
+- **Config-first.** `CoreModule` resolves the tenant's `algolia` config from the config service and validates it against the Zod `configSchema` at read time. Everything downstream reads config via `@InjectConfig()`.
+- **Two data sources.** Centra (Shop API or the shared MongoDB) for products, Storyblok for content.
+- **Algolia SDK.** Upload uses the Algolia admin (`write_api_key`) client; the search key is only ever handed to the frontend.
+
+## Config
+
+The Zod schema is `src/lib/config-schema.ts`. The top-level shape:
+
+| Key | What it holds |
+|---|---|
+| `algolia` | `application_id`, `write_api_key` (indexing), `search_api_key` (handed to the frontend) |
+| `centra` | `shop_api_url`, `shop_api_key`, optional checkout API creds |
+| `storyblok` | `token`, `version` — optional; only needed for Storyblok feeds |
+| `feed` | The pipeline definition — version, `debug`, `indexPrefix`, and `pipes[]` |
+| `modules.centra` | Optional Centra module configuration |
+
+`feed.indexPrefix` is `"prod"` or `"stage"` and is prepended to **every** index name. `feed.version` is a discriminated union:
+
+- **`version: "1"`** — legacy. Requires a top-level `languages[]`; indices are language-based.
+- **`version: "2"`** — market-aware. No top-level languages; each pipe's localizer decides the grouping.
+
+### Pipes
+
+A pipe is one independent feed. `feed.pipes[]` can hold many. Each pipe (`src/types/pipes.ts`):
+
+```jsonc
+{
+  "name": "products",
+  "type": "product",                 // arbitrary tag, also used to scope admin runs
+  "loader": "centra-shop-api-product-loader",   // or "storyblok-loader"
+  "loader_options": { "page_size": 200, "fetch_from_database": false },
+  "localizer": { "type": "shop-api-product-localizer-v2", "group_by": { /* … */ } },
+  "formatters": [ /* the transform chain — see below */ ],
+  "uploader": { "type": "algolia-uploader-v1", "object_id_path": "$.product", "objects_until_flush": 20 },
+  "revisionizer": { "type": "revisionizer-v1" }
+}
+```
+
+The **localizer** (Centra pipes only) controls language/market fan-out:
+
+- `shop-api-product-localizer-v1` — the default; simple per-language.
+- `shop-api-product-localizer-v2` — `group_by: { type: "language", languages: [...] }` **or** `group_by: { type: "language-per-market", mapping: [{ market, language, pricelists? }] }`. Required if you want market- and pricelist-aware indices.
+
+## The formatter pipeline
+
+This is the core idea. `ProductFeedBuilder.build` (`src/service/feeds/centra/shop-api/product-feed-builder.ts`) assembles a **Node stream pipeline** and runs records through it:
+
+```
+loader → localizer → formatter₁ → … → formatterₙ → revisionizer → uploader
+```
+
+Every stage is an async generator wrapped in `Duplex.from(...)`, so records stream through one at a time — feeds of any size run without loading everything into memory. Records travel as a `StreamObject` carrying three slots (`src/service/feeds/formatters/formatter-utils.ts`): the **object** being built, **extra** per-record context (e.g. `indexName`, `market`), and **global** shared data.
+
+**The loader** is chosen by `loader_options.fetch_from_database`:
+
+- `false` (default) → `ProductRepository.getProductsGenerator(...)` pulls products live from the **Centra Shop API**, paginated by `page_size`.
+- `true` → `MongodbProductLoader` streams products from **MongoDB** (see next section).
+
+**Formatters** each do one small transform. The catalogue (`src/types/formatters/index.ts`, registered in `product-formatter-factory.ts`):
+
+| Formatter | Purpose |
+|---|---|
+| `object-builder-v1` | Build a fresh object from only selected attributes (key → JSONPath) |
+| `attribute-builder-v1` | Add/replace attributes resolved from JSONPath queries |
+| `extra-attribute-injector-v1` | Copy values from the pipeline's `extra` context onto the object |
+| `attribute-stringifier-v1` | Stringify a complex (array/object) value |
+| `attribute-to-array-v1` | Coerce a Map/Set/Object value into a plain array |
+| `attribute-key-sorter-v1` | Sort the keys at a path |
+| `attribute-cleaner-v1` | Remove unwanted attributes by JSONPath (`removals[]`) |
+| `string-replacer-v1` / `string-splitter-v1` | String transforms on a path |
+| `split-data-v1` / `split-data-v2` | Split one record into many objects, or fan into another index suffix |
+| `filter-on-attribute-values-v1` | Drop records that don't match given attribute values |
+| `global-injector-v1` | Inject shared global data into the record |
+| `shop-api-related-product-resolver-v1` | Resolve and inject related products (e.g. colour swatches) |
+| `conditional` | Pick another formatter config at runtime based on the record's data |
+| `revisionizer-v1` | Stamp revision metadata used for incremental upload |
+
+**The uploader** (`algolia-uploader-v1`, `src/service/feeds/uploaders/algolia-uploader-v1.ts`):
+
+- Batches records and flushes every `objects_until_flush` (default 20, max 500).
+- Derives each `objectID` from `object_id_path` and namespaces it with the pipe `type` (`product-123`).
+- Tags every object with `algoliaTypeID` and `gearsLoaderType` so runs can be scoped and cleaned.
+- **Incremental:** it browses the index's existing `__rev` values up front and *skips* any object whose revision is unchanged.
+- After upload, the `StaleDataCleaner` deletes objects that exist in the index but weren't seen in this run.
+- Target index = `` `${indexPrefix}-${indexName}` `` where `indexName` comes from the localizer.
+
+> `feed.debug: true` is intended to short-circuit the actual upload (return the feed data instead) — handy for inspecting output. Treat it as a debugging switch, not a normal mode.
+
+## Connection to MongoDB
+
+The service has **no MongoDB collection of its own.** When a pipe sets `loader_options.fetch_from_database: true`, it reads the **shared Centra product documents** that the Centra integration (and the BFF) already populate — the same MongoDB described in [The BFF](./bff).
+
+`CentraMongodbProductRepository` (`src/repository/centra-mongodb-product.repository.ts`) resolves the Mongoose model via `MongooseModelResolver` using `centraProductSchemaDefinition` / `CentraProductDocument` from `@made-people/nestjs-centra-module`, then:
+
+- runs an aggregation that matches documents with a `shopProduct`, projects out the heavy `checkoutProduct`, and yields them as an **async generator** (so the feed pipeline streams straight from the cursor);
+- resolves each product's `relatedProducts` by a second `$in` lookup and attaches them, preserving the original `relation`.
+
+Reading from Mongo instead of Centra's live Shop API means a full reindex doesn't hammer Centra and runs against data that's already been imported. Live Shop API (`fetch_from_database: false`) is the alternative when you want the freshest data and accept the API load.
+
+## API endpoints
+
+There's no global `/v1` router prefix here — paths are exactly as below.
+
+### Search context (public)
+
+The frontend calls these to get its Algolia credentials and index name. They return an `AlgoliaClientConfigDTO`: `application_id`, `search_api_key` (search-only), `index_name`, and the unique `type_ids` across the config.
+
+| Route | Method | For | Notes |
+|---|---|---|---|
+| `algolia/context/:href_lang` | GET | **v1** feeds | `index_name = {indexPrefix}-{href_lang}`. 400 on a v2 config; 404 if `href_lang` isn't in `feed.languages`. |
+| `algolia/v2/context/:pipe_name` | GET | **v2** feeds | Query `language` (required) and `market` (required). `index_name` is `{indexPrefix}-{language}` or `{indexPrefix}-{market}-{language}` depending on the pipe's `group_by`. Pipe must be a `centra-shop-api-product-loader` with localizer `v2`. |
+
+This is what `grease-algolia`'s client getter hits — see [Implementing Algolia §2](./algolia).
+
+### Admin feed (auth required)
+
+Prefix `admin/feed/algolia/v1`. Every route carries `@ApiTenantHeader` **and** `@ApiKeyAdminHeader` (admin key required). They schedule feed builds through the `FeedDispatcher`.
+
+| Route | Method | What it does |
+|---|---|---|
+| `admin/feed/algolia/v1/all` | POST | Build every pipe that uses `algolia-uploader-v1` |
+| `admin/feed/algolia/v1/loader/:loader_name` | POST | Build only pipes for that loader (`centra-shop-api-product-loader` or `storyblok-loader`; 400 otherwise) |
+| `admin/feed/algolia/v1/type/:type_id` | POST | Build only pipes whose `type` matches |
+
+The dispatcher (`src/service/feeds/feed-dispatcher.ts`) filters the configured pipes, routes each to the product or Storyblok feed builder, and runs them with `Promise.allSettled`, returning a per-pipe `{ success, message }`.
+
+### Operational
+
+- `GET /health` — health check.
+- `GET /api` and `GET /api-json` — interactive Swagger UI and OpenAPI spec, tagged **Algolia** and **Algolia Feeds**.
+
+## Running it locally
+
+The service listens on `8085` and is reachable tenant-aware at `https://<tenant>.algolia.local.frackend.net:8080` through the Docker nginx proxy. See [Running Services Locally (Docker)](./docker) for the stack, and add `LOCAL_SERVICES=algolia` to a client's `.env` to point it at your instance ([Getting Started §5](./getting-started)).
+
+You need:
+
+- **Config** for the tenant (the `algolia` app config) served by the config service.
+- **MongoDB** running if any pipe uses `fetch_from_database: true`, populated with Centra products.
+- **Centra Shop API credentials** in config for live loading and for the search-context market lookups.
+
+Trigger a build with an admin key, e.g. `POST https://<tenant>.algolia.local.frackend.net:8080/admin/feed/algolia/v1/all`.
+
+## Gotchas
+
+- **Wrong feed version on a context call.** `algolia/context/:href_lang` 400s on a v2 config and `algolia/v2/context/...` 400s on a v1 config. Match the endpoint to `feed.version`.
+- **v2 context needs `market`.** Even for `group_by: language`, the v2 endpoint requires both `language` and `market` query params, and the pipe must use localizer v2.
+- **Nothing uploaded, "did not upload anything" warning.** Either everything was unchanged (revisions matched) or the loader produced no records — check the loader source and `type`/`loader` filters on the run you triggered.
+- **Stale records linger.** Stale cleanup only runs for objects matching the run's `algoliaTypeID` + `gearsLoaderType`. If you change a pipe's `type`, old objects under the previous tag won't be cleaned by the new run.
+- **`object_id_path` collisions.** If two records resolve the same `objectID`, the later one overwrites the earlier in the index. Make sure the JSONPath points at something unique per record.
+- **Forgot the admin key.** All `admin/feed/...` routes are gated by `@ApiKeyAdminHeader`; without it you get 401.
+- **`fetch_from_database` against an empty Mongo.** Reads nothing if the Centra import hasn't populated products yet — run the import (BFF/Centra side) first, or use live loading.
+
+## Troubleshooting
+
+**A reindex pulls stale data** — the pipe is reading MongoDB (`fetch_from_database: true`) and the Centra import is behind. Re-run the import, or switch the pipe to live Shop API loading.
+
+**Index name isn't what you expect** — it's `{indexPrefix}-{...}`. Check `feed.indexPrefix` (`prod`/`stage`) and the localizer's `group_by` (language vs. language-per-market changes the suffix).
+
+**Records appear but facets are wrong shape** — a formatter in the chain is the culprit. The order matters: `object-builder-v1` first to pick fields, then shape with `attribute-*` formatters, `attribute-cleaner-v1` last to drop heavy attributes.
+
+**Frontend search returns nothing** — confirm the context endpoint returns the right `index_name` and that a feed has actually been built into that index. The service only hands out credentials; it doesn't proxy search.
+
+**A new formatter type is rejected by config validation** — it must be added to the Zod schema in `src/types/formatters/index.ts` and registered in `product-formatter-factory.ts`. Config is validated against that union at read time.
+
+## Related
+
+- [Implementing Algolia](./algolia) — the client-side counterpart that consumes the search-context endpoint
+- [Product Feeds](./feeds) — the per-brand outbound feed URLs, including the Algolia admin feed
+- [Implementing Centra](./centra) and [Centra Mappers](./centra-mappers) — where the product data originates
+- [The BFF](./bff) — shares the same MongoDB the Algolia service reads from
+- [Swagger / OpenAPI](./swagger) — the `/api` UI every service including this one exposes
+- [Running Services Locally (Docker)](./docker) — bringing the service and its dependencies up
+
+**Next:** [Implementing Algolia](./algolia) · [Product Feeds](./feeds) · [Implementing Centra](./centra) · [The BFF](./bff)

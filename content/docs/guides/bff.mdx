@@ -233,6 +233,8 @@ cp env-dist .env
 npm run start:dev          # or: rush build:watch for deps
 ```
 
+The BFF needs MongoDB and Redis (and usually the config service) running. The easiest way to get them — plus the tenant-aware nginx front door — is the Docker stack: see [Running Services Locally (Docker)](./docker).
+
 Then point a client at it by adding `LOCAL_SERVICES=bff` to the client's `.env` (see [Getting Started §5](./getting-started)). The client resolves `bff` to `https://<tenant>.bff.local.<GEARS_DOMAIN>:8080`.
 
 ## Gotchas

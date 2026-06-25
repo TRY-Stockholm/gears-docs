@@ -58,7 +58,7 @@ export const getAlgoliaClient = async (language, market, algoliaServiceUrl) => {
 };
 ```
 
-The gears endpoint looks like `/algolia/v2/context/products?market=…&language=…`. `indexName` is fetched — there is no prop to set it directly on `AlgoliaProvider`.
+The gears endpoint looks like `/algolia/v2/context/products?market=…&language=…`, served by the backend [Algolia service](./algolia-service). `indexName` is fetched — there is no prop to set it directly on `AlgoliaProvider`.
 
 > **No token, no Insights.** If `algoliaConfig.insights?.userToken` is unset, `AlgoliaNotifications` never mounts and zero events are sent. Generate the token before `AlgoliaProvider` renders.
 
@@ -165,4 +165,8 @@ Facet state is owned by `grease-search`. Selections are translated via `searchRe
 - `@made-people/grease-product`, `@made-people/grease-cart`, `@made-people/grease-order` — event emitters `AlgoliaNotifications` subscribes to
 - `@made-people/gears-configuration` — `useGearsServiceUrl("algolia")` to resolve credentials
 
-**Next:** [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [Cart](./cart) · [Product](./product) · [Checkout](./checkout)
+## Related
+
+- [The Algolia Service](./algolia-service) — the backend that builds the indices and serves the search-context credentials this guide consumes
+
+**Next:** [The Algolia Service](./algolia-service) · [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [Cart](./cart) · [Product](./product) · [Checkout](./checkout)
