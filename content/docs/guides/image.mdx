@@ -84,8 +84,8 @@ Both methods receive the same `ImageProcessingOptions` — a union-of-features s
 |---|---|---|
 | `CloudflareImageProcessor` | Any URL (`shouldHandleImage` returns `true`) | Rewrites to `<baseUrl>/cdn-cgi/image/<options>/<originalUrl>`. Rich options: `fit`, `gravity`, `dpr`, `blur`, `brightness`, etc. Designed to be the final catch-all in the chain. |
 | `StoryblokImageProcessor` | Hostnames ending in `storyblok.com` | Uses `/m/WIDTHxHEIGHT/filters:quality(N)` path syntax. Defaults to 80% quality. |
-| `ImgproxyImageProcessor` | Configured base | For self-hosted Imgproxy instances |
-| `PlaceholditImageProcessor` | `placehold.it` | For dev / testing with placeholder images |
+| `ImgproxyImageProcessor` | Any URL (`shouldHandleImage` returns `true`) | Catch-all that prepends `<baseUrl>/` to the image. For self-hosted Imgproxy instances; like Cloudflare, it must come late in the chain. |
+| `PlaceholditImageProcessor` | The exact sentinel string `"placeholdit"` | Matches only when the image value literally equals `placeholdit`, then outputs `https://placehold.it/WxH`. For dev / testing with placeholder images. |
 | `EchoImageProcessor` | Any URL (identity) | Returns the URL unchanged — for Storybook/mocks, or to opt into silent fallthrough |
 
 ### Storyblok — URL-match based
@@ -144,7 +144,7 @@ Cloudflare's image transformation CDN can proxy any image URL, so `shouldHandleI
 new CloudflareImageProcessor("https://assets.missmaryofsweden.com");
 ```
 
-Because it matches everything, `CloudflareImageProcessor` must go **last** in the chain — any URL-specific processor you want to handle (Storyblok, Imgproxy) has to come before it.
+Because it matches everything, `CloudflareImageProcessor` must go **last** in the chain — any URL-specific processor (e.g. Storyblok) has to come before it. Note `ImgproxyImageProcessor` is *also* a catch-all, so only one catch-all can effectively be in play; whichever comes first wins.
 
 ### Echo — the escape hatch
 

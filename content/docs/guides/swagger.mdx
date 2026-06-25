@@ -191,22 +191,24 @@ public result!: SuccessResponseV1 | ErrorResponseV1;
 Bare controllers work, but adding decorators makes the docs scannable:
 
 ```ts
-import { ApiTags, ApiOperation, ApiResponse } from "@nestjs/swagger";
+import { ApiTags, ApiOkResponse } from "@nestjs/swagger";
+import { ApiKeyAdminHeader, ApiTenantHeader } from "@made-people/gears-nestjs-core";
 
 @ApiTags("Algolia Feeds")
 @ApiTenantHeader
-@Controller(ADMIN_FEED_CONTROLLER_PREFIX)
+@ApiKeyAdminHeader
+@Controller("admin/feed/algolia/v1")
 export class AlgoliaFeedsController {
-  @Get("/products/:siteSlug")
-  @ApiOperation({ summary: "Generate the Algolia product feed for a site" })
-  @ApiResponse({ status: 200, type: ProductFeedResponseV1 })
-  public async generate(
-    @Param("siteSlug") siteSlug: string,
-  ): Promise<ProductFeedResponseV1> {
-    return this.feedService.generate(siteSlug);
+  @Post("/all")
+  @ApiOkResponse({ description: "The jobs were successfully scheduled" })
+  public async createAllFeeds(@Res() res: FastifyReply) {
+    const results = await this.feedDispatcher.scheduleAllFeeds("algolia-uploader-v1");
+    return res.status(200).send(results);
   }
 }
 ```
+
+`@ApiKeyAdminHeader` (from `gears-nestjs-core`) renders an editable `x-admin-key` field in the UI for admin-gated routes, just as `@ApiTenantHeader` does for `x-tenant-id`.
 
 What each one does:
 
@@ -276,8 +278,8 @@ Every service whose `main.ts` calls `createGearsApp` exposes `/api`. Today:
 | Voyado Engage | `nestjs-voyado-engage` | Customer identification, newsletter, promotions, vouchers |
 | Yotpo | `nestjs-yotpo-service` | Reviews integration (the one Reviews integration in the monorepo today) |
 | Recrql | `nestjs-recrql-service` | Search/recommendation proxying |
-| Voyado Elevate | `voyado-elevate` | Search proxy for the Elevate adapter |
-| Config | `nestjs-config-service` | Tenant config CRUD |
+| Voyado Elevate | `voyado-elevate-service` | Search proxy for the Elevate adapter |
+| Config | `gears-nestjs-config-service` | Tenant config CRUD |
 | Monorebot | `nestjs-monorebot` | Internal CI/automation surface |
 
 Eight services with a `main.ts` and Swagger today; the count grows when new services are added. Each is independently inspectable at its own `/api`.
@@ -311,7 +313,7 @@ This produces a typed schema you can wrap in a fetch helper. Useful for consumer
 
 **Field is in the TypeScript class but not in the schema** — `@ApiProperty()` is missing on that field. Add it.
 
-**`Try it out` works locally but 401s in prod** — That's expected if the endpoint is admin-gated. The Swagger UI doesn't auto-attach your auth header. Either paste an admin key into the `x-admin-key` field at the top of the page, or add `@ApiHeader({ name: 'x-admin-key' })` to that controller so the UI prompts for it explicitly.
+**`Try it out` works locally but 401s in prod** — That's expected if the endpoint is admin-gated. The Swagger UI doesn't auto-attach your auth header. Either paste an admin key into the `x-admin-key` field at the top of the page, or add the shipped `@ApiKeyAdminHeader` decorator (from `gears-nestjs-core`) to that controller so the UI prompts for it explicitly.
 
 **OpenAPI JSON differs from runtime validation** — Some `@ApiProperty()` option contradicts a `class-validator` decorator (e.g. `@ApiProperty({ required: false })` paired with `@IsNotEmpty()`). The UI says optional, the validator says required. Reconcile: drop one of them, or align them.
 

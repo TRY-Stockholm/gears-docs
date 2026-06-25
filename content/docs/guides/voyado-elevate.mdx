@@ -1,0 +1,206 @@
+---
+title: Voyado Elevate
+description: The Elevate package beyond the search adapter — recommendations, autocomplete, purchase analytics, and the client-data layer that powers Stronger
+---
+
+## What you'll learn
+
+What `@made-people/grease-voyado-elevate` gives a client *on top of* its search adapter: algorithm-driven recommendations, an Elevate-backed autocomplete client, the `voyado_elevate_purchase` GTM event, and the `ElevateClientData` layer that carries the Apptus client, customer key, and market. The search-result adapter itself — `ElevateProvider`, `ElevateSearchResultsProvider`, the five query types, `elevateProductGroupToGreaseProduct`, and the four `SearchResultMethods` — lives in [Search Architecture](./search). Read that first; this guide does not repeat it.
+
+## The four things to know
+
+1. **Elevate is more than search.** The same package that implements the search adapter also ships recommendations, autocomplete, click/add-to-cart notifications, and purchase analytics. All of them reuse the adapter's `ElevateSearchResultsProvider` and the same `ElevateClientData` getter.
+2. **Recommendations are just a query type.** `ElevateRecommendations` takes an Apptus `Algorithm`, maps it to one of three Elevate page endpoints, and mounts an `ElevateSearchResultsProvider` with the right query. The children read results through the ordinary search hooks.
+3. **Everything routes through `elevateClientDataGetter`.** Autocomplete, notifications, and the purchase event all call the async getter to obtain the Apptus client and the `{ customerKey, sessionKey, elevateMarket }` session data. The client wires it once on `ElevateProvider`.
+4. **Elevate keys live on product attributes.** `voyado_elevate_product_key`, `voyado_elevate_variant_key`, and `ticket` are read off `product.base.attributes` to build cart/PDP queries, fire notifications, and report purchases. No key, no event.
+
+## 1. Beyond search — what Elevate adds
+
+Elevate is Stronger's search vendor, wrapping [`@apptus/esales-api`](./search). Beyond the search-result adapter documented in [Search Architecture](./search), the package exports:
+
+| Area | Exports |
+|---|---|
+| Recommendations | `ElevateRecommendations`, `getElevateCartIds`, `getElevatePDPProductKey` |
+| Reco mappers | `elevateRecommendationListToSearchResult`, `elevatePrimaryListToSearchResult` |
+| Autocomplete | `VoyadoAutoCompleteProvider`, `VoyadoElevateAutoCompleteClient` |
+| Analytics | `useSendElevatePurchaseEventToGtm`, `useElevateSendNotification` |
+| Client data | `ElevateClientData` types, `ElevateClientDataGetter` |
+| Body helpers | `buildBodyWithProductRules`, `getProductRules`, `fetchElevateProductList` |
+
+The adapter contract (`ElevateProvider`, `ElevateSearchResultsProvider`, the query-type union, `elevateProductGroupToGreaseProduct`, `SearchResultMethods`) is documented in [Search Architecture](./search) — this guide covers only what sits on top of it.
+
+## 2. `ElevateRecommendations` — algorithm → query mapping
+
+`ElevateRecommendations` (`src/recommendations/elevate-recommendations.tsx`) takes a single prop — `recommendationAlgorithm`, an Apptus `Algorithm` — and translates it into an `ElevateSearchResultsProvider` query. It reads cart state via `useCartState`, the current PDP product via `useMaybeProductBase`, and product rules via `useElevateProductQueryOptions`.
+
+```tsx
+import { ElevateRecommendations } from "@made-people/grease-voyado-elevate";
+
+<ElevateRecommendations recommendationAlgorithm="UPSELL">
+  <RecommendationList />
+</ElevateRecommendations>;
+```
+
+The algorithm decides both the query type and the Elevate endpoint:
+
+| `Algorithm` | Query type | Elevate endpoint | Resolves from |
+|---|---|---|---|
+| `TOP_PRODUCTS` | `landing-page-recommendations` | Landing Page | dummy page reference |
+| `NEWEST_PRODUCTS` | `landing-page-recommendations` | Landing Page | dummy page reference |
+| `RECENTLY_VIEWED` | `landing-page-recommendations` | Landing Page | dummy page reference |
+| `PERSONAL` | `landing-page-recommendations` | Landing Page | dummy page reference |
+| `CART` | `cart-page` | Cart Page | `getElevateCartIds(cart)` |
+| `ALTERNATIVES` | `product-page` | Product Page | `getElevatePDPProductKey(productBase)` |
+| `STYLE_WITH` | `product-page` | Product Page | `getElevatePDPProductKey(productBase)` |
+| `MORE_FROM_SERIES` | `product-page` | Product Page | `getElevatePDPProductKey(productBase)` |
+| `UPSELL` | `product-page` | Product Page | `getElevatePDPProductKey(productBase)` |
+
+The `landing-page-recommendations` queries pass `primaryList: { include: false }` and a dummy `pageReference` — Elevate requires a page reference even when no primary list is requested. Each query attaches `productRules` from the query options via `getProductRules`.
+
+Two guards short-circuit to `null`:
+
+- **`CART`** — if `getElevateCartIds(cart)` is empty (no items carry `voyado_elevate_product_key`), no query is built.
+- **`ALTERNATIVES` / `STYLE_WITH` / `MORE_FROM_SERIES` / `UPSELL`** — if `getElevatePDPProductKey` returns `undefined` (no PDP product in context, or it has no Elevate key), no query is built.
+
+`getElevateCartIds` (`src/recommendations/utils/get-elevate-cart-ids.ts`) maps cart items to their `voyado_elevate_product_key` attribute values. `getElevatePDPProductKey` (`src/recommendations/utils/get-elevate-pdp-product-key.ts`) reads the same attribute off a single `ProductBase`.
+
+## 3. Recommendation mappers & behavior
+
+Recommendation responses do not flow through `elevatePrimaryListToSearchResult` — they use a dedicated mapper:
+
+- **`elevateRecommendationListToSearchResult`** (`src/mappers/elevate-recommendation-list-to-search-result.ts`) — takes an Apptus `RecommendationList`, maps each `productGroup` through the client's product mapper, and returns a `SearchResult`. The meta is always single-page: `currentPage: 1`, `totalPages: 1`, `totalItems` equal to the mapped item count. **No facets, no sort, no pagination.**
+- **`elevatePrimaryListToSearchResult`** (`src/mappers/elevate-primary-list-to-search-result.ts`) — the list/search-page counterpart. It carries real `totalHits`-based pagination and maps facets via `mapElevateFacetToGearsFacet`. This is what landing and search pages use.
+
+The practical consequence: a recommendation block renders exactly one page of items. `useSearchResultLoadMore` / `useSearchResultLoadPage` have nothing to load, and `useFacets` returns an empty list. Treat recommendation results as a flat carousel, not a PLP.
+
+## 4. `VoyadoAutoCompleteProvider` & the autocomplete client
+
+Autocomplete plugs into `grease-search`'s `AutoCompleteProvider` rather than the search-result provider.
+
+`VoyadoAutoCompleteProvider` (`src/auto-complete/voyado-auto-complete-provider.tsx`) reads the client-data getter, the product mapper, and the query options from context, then constructs a `VoyadoElevateAutoCompleteClient` and hands it to `AutoCompleteProvider`:
+
+```tsx
+<AutoCompleteProvider
+  autoCompleteClient={
+    new VoyadoElevateAutoCompleteClient(
+      getElevateClientData,
+      productQueryOptions,
+      elevateProductGroupToGreaseProduct,
+    )
+  }
+>
+  {children}
+</AutoCompleteProvider>
+```
+
+`VoyadoElevateAutoCompleteClient` (`src/auto-complete/voyado-elevate-auto-complete-client.ts`) implements `AutoCompleteClientDriver`. Its `search` method calls `elevateClient.query.autocomplete`, then maps the result into the shape `grease-search` expects:
+
+| Response field | Source |
+|---|---|
+| `productSuggestions` | `result.productSuggestions` → product mapper |
+| `recentlyViewed` | `result.recentlyViewed` → product mapper |
+| `recentSearches` | `result.recentSearches[].q` |
+| `phraseSuggestions` | `result.phraseSuggestions[].q` |
+
+The query passes `presentCustom`, `presentPrices`, and `stores` from the query options, plus `channels: "STORE"` (required for store stock), and applies `productRules` via `getProductRules` on the body. If the client getter returns no `elevateClient`, or the request throws, it returns an empty response (`{ productSuggestions: [] }`) and logs to the console — autocomplete fails silently rather than breaking the search box.
+
+## 5. Analytics: `useSendElevatePurchaseEventToGtm` & the purchase event
+
+`useSendElevatePurchaseEventToGtm` (`src/hooks/use-send-elevate-purchase-event.ts`) returns an async function you call with the `orderPlaced` payload from `grease-order`. It reads the session via the client-data getter, walks the ordered items, and pushes a `voyado_elevate_purchase` event to the GTM data layer (see [GTM & Analytics](./gtm)).
+
+For each item it reads two product attributes — `voyado_elevate_product_key` and `voyado_elevate_variant_key`. **Items missing either key are dropped.** If no items survive, no event fires.
+
+```ts
+gtmDataLayerPushRaw({
+  event: "voyado_elevate_purchase",
+  ecommerce: {
+    items,          // { productKey, variantKey, quantity, sellingPrice }
+    customerKey,    // from additionalEventData.session()
+    sessionKey,     // from additionalEventData.session()
+    elevateMarket,  // from additionalEventData.elevateMarket
+  },
+});
+```
+
+The companion hook `useElevateSendNotification` (`src/hooks/use-elevate-send-notification.ts`) fires Elevate's `click` and `addToCart` engagement notifications. It needs an Elevate `ticket`: it first looks for a `ticket` attribute on the product, and if absent fetches the product page from Elevate (by `voyado_elevate_product_key`) and reads the ticket off the matching variant or product. No ticket means no notification.
+
+## 6. `ElevateClientData` / `elevateClientDataGetter`
+
+`ElevateClientDataGetter` (`src/types/elevate-client-data.ts`) is the single async source for everything Elevate needs at request time:
+
+```ts
+export type ElevateClientDataGetter = () => Promise<{
+  elevateClient: ElevateClient | undefined;
+  additionalEventData: ElevateOrderEventAdditionalData | undefined;
+}>;
+```
+
+- **`elevateClient`** — the Apptus client (`elevate(...)` minus `__config`). Used by the adapter, autocomplete, notifications.
+- **`additionalEventData`** — `{ elevateMarket, session() }`, where `session()` returns `{ customerKey, sessionKey }`. Used by the purchase event.
+
+Both may be `undefined` — every consumer guards against that (autocomplete returns empty, notifications bail, the purchase event reads optional chaining). The getter is the one prop a client must supply to `ElevateProvider` (alongside `mappers` and `productQueryOptions` — see [Search Architecture](./search)).
+
+### Body helpers
+
+These are shared between the adapter and the recommendation/autocomplete layers:
+
+- **`getProductRules`** (`src/utils/get-product-rules.ts`) — turns `ProductRule[]` into Elevate's `rule incl … { "…" }` / `rule excl …` string syntax. Returns `undefined` for an empty list.
+- **`buildBodyWithProductRules`** (`src/utils/build-body-with-product-rules.ts`) — merges product rules into a landing/search body's `primaryList`.
+- **`fetchElevateProductList`** (`src/utils/fetch-elevate-product-list.ts`) — one switch over the query type that calls the matching `elevateClient.query.*` endpoint and returns either a `landing-page` (`PrimaryList`) or a `recommendation-list` (`RecommendationList`). On error, or on an empty search query (Elevate rejects empty `q`), it returns `{ type: "landing-page", list: undefined }`.
+
+## 7. Wiring in Stronger
+
+Stronger composes the providers in `app/project/elevate-bootstrap.tsx` (the `ElevateBootstrap` component), mounted inside `SearchProvider` from `bootstrap.tsx`:
+
+```tsx
+<ElevateProvider
+  mappers={mappers}
+  productQueryOptions={productQueryOptions}
+  elevateClientDataGetter={elevateClientDataGetter}
+>
+  <VoyadoAutoCompleteProvider>{props.children}</VoyadoAutoCompleteProvider>
+</ElevateProvider>
+```
+
+`elevateClientDataGetter` is built from `getElevateClientData` (`app/project/voyado/get-elevate-client.tsx`), which fetches the Elevate market config (`elevate_market_name`, `language`, `cluster_id`) from the gears Elevate service via `useGearsServiceUrl("elevate")`, constructs the Apptus client, and supplies the `session()` from Voyado customer/session cookies.
+
+Recommendations are used on the PDP through the bundle-upsell components in `app/project/components/bundle-upsell/`:
+
+- **`StrongerBundleUpsell.tsx`** — defines `MATCH_WITH_ALGORITHM = "UPSELL"` and wraps its list in `<ElevateRecommendations recommendationAlgorithm={MATCH_WITH_ALGORITHM}>`.
+- **`StrongerMatchWithSwiper.tsx`** — imports the same constant and renders an `ElevateRecommendations` swiper.
+
+Both are rendered from the Centra product-page route (`app/gears/routes/centra-product-page-route.tsx`), so `useMaybeProductBase` resolves the PDP product and `getElevatePDPProductKey` can build the `product-page` query.
+
+## Gotchas
+
+- **Recommendations have no facets or pagination.** `elevateRecommendationListToSearchResult` always returns one page with empty facets/sort. Don't wire `useFacets` or "load more" into a recommendation block — they'll be inert.
+- **No Elevate key, no recommendation.** `CART` recommendations need cart items carrying `voyado_elevate_product_key`; PDP algorithms need the same key on the product base. Missing keys make `ElevateRecommendations` render `null` with no error.
+- **No keys, no purchase event.** `useSendElevatePurchaseEventToGtm` drops any ordered item without both `voyado_elevate_product_key` and `voyado_elevate_variant_key`, and skips the event entirely if none remain. Confirm the mapper attaches both keys.
+- **The dummy `pageReference`.** `landing-page-recommendations` queries send `pageReference: "dummy"`. This is intentional — Elevate requires a page reference even when `primaryList.include` is `false`. Don't "fix" it.
+- **Autocomplete swallows errors.** A failed autocomplete request returns an empty response and only logs to the console. An empty suggestions dropdown often means the client getter resolved no `elevateClient`, not that there were no matches.
+- **`presentCustom` applies to autocomplete too.** Autocomplete builds its product suggestions through the same mapper as the PLP, so any custom field the mapper reads must be listed in `productQueryOptions.presentCustom` — same trap as the search adapter.
+
+## Troubleshooting
+
+**`ElevateRecommendations` renders nothing** — the algorithm's guard failed. For `CART`, check the cart has items with `voyado_elevate_product_key`. For PDP algorithms, confirm `useMaybeProductBase` resolves and the product carries the Elevate key.
+
+**Recommendation carousel never paginates** — expected. Recommendation results are single-page by design; render all items at once.
+
+**`voyado_elevate_purchase` not in the data layer** — every ordered item is missing one of the two Elevate keys, or the mapper isn't attaching them. Log `order.items[].product.base.attributes` and look for both keys.
+
+**Autocomplete returns no suggestions** — the client getter likely returned no `elevateClient` (bad market config, Elevate service unreachable). Check the console for the autocomplete error log and verify `useGearsServiceUrl("elevate")`.
+
+**Click / add-to-cart engagement missing in Elevate** — `useElevateSendNotification` couldn't resolve a `ticket`. Confirm the product carries a `ticket` attribute, or that the fallback product-page fetch by `voyado_elevate_product_key` succeeds.
+
+## Related
+
+- [Search Architecture](./search) — the Elevate search adapter, query types, `SearchResultMethods`, and `elevateProductGroupToGreaseProduct` this guide builds on
+- [Implementing Algolia](./algolia) — the sibling search vendor, with its own recommendations and autocomplete
+- [Depict](./depict) — another recommendations vendor
+- [GTM & Analytics](./gtm) — where the `voyado_elevate_purchase` event lands
+- [Cart](./cart) · [Product](./product) — the state `ElevateRecommendations` reads to build cart and PDP queries
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — where the Elevate providers sit in the stack
+
+**Next:** [Search Architecture](./search) · [GTM & Analytics](./gtm) · [Implementing Algolia](./algolia)
+</content>
+</invoke>

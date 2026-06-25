@@ -31,9 +31,6 @@ Peer deps: `@made-people/grease-search`, `@made-people/grease-product`, `@made-p
 > **SDK version skew.** `@algolia/client-insights` is on the v5 SDK line (`~5.45.0`) while `algoliasearch` and `@algolia/recommend` are still on v4 (`~4.20.0`). The code below uses both lines side by side — that's intentional, not a typo.
 
 > **Import path.** The search client imports from `algoliasearch/lite` (which matches the `SearchClient` type expected by the provider), not from the package root.
-
-Current package version: `1.6.7`.
-
 ## 2. Build the client getter
 
 `AlgoliaProvider` takes an async `algoliaClientDataGetter` returning the three Algolia clients plus `indexName`:

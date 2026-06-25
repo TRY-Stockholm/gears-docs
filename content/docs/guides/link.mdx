@@ -1,0 +1,226 @@
+---
+title: Grease Link
+description: App-agnostic internal-link plumbing — how the host injects its router once and grease components consume links, hrefs, and navigation without knowing the framework
+---
+
+## What you'll learn
+
+How `@made-people/grease-link` lets every grease and Blueprint component render links and navigate without importing your router. The host app injects its `LinkComponent`, a `navigate` function, and the current `siteSlug` once at the root; everything below reads them through `useLink`, `useHref`, and `useNavigate`. You'll also see how UTM and click-id query params get forwarded onto internal links automatically.
+
+## The four things to know
+
+1. **Grease components don't know your router.** They call `useLink()` / `useHref()` / `useNavigate()` and get back a link component, an href formatter, and a navigate function. The actual Remix/Next `<Link>` is injected once at the root.
+2. **One provider carries three things.** `LinkProvider` holds `siteSlug`, `LinkComponent`, and `navigate`. That's the whole contract.
+3. **Hrefs auto-format.** `useHref` (and `useLink`'s default link component) prefixes internal paths with the `siteSlug` and forwards whitelisted query params. External URLs (`http`, `mailto`, `tel`) pass through untouched.
+4. **UTM / click-ids are forwarded.** `WhitelistedQueryParamsProvider` captures attribution params from the landing URL and re-appends them to every internal link, so they survive client-side navigation.
+
+## Prerequisites
+
+- A React client with `@made-people/grease-link` installed.
+- A router-bound link component to inject — e.g. `GreaseRemixLink` from `@made-people/grease-remix`.
+- The current `siteSlug` (from the BFF `frontendContext`) and a `navigate` function from your router.
+
+Install:
+
+```bash
+# Inside the monorepo
+rush add -p @made-people/grease-link
+
+# Outside the monorepo
+pnpm add @made-people/grease-link
+```
+
+## 1. Why grease-link exists
+
+Grease packages are framework-agnostic. A `ProductCard` from `grease-product` ships to clients running Remix today and could run on another router tomorrow — so it can't `import { Link } from "@remix-run/react"`. If it did, every grease package would hard-couple to one router and break the moment a client used a different one.
+
+`grease-link` is the seam. The host app — the only layer that *knows* it's Remix — injects its router's link component and navigation function once. Grease components consume them through hooks and never see the framework.
+
+The whole package is three exports doing the injecting (`LinkProvider`, `WhitelistedQueryParamsProvider`) and three doing the consuming (`useLink`, `useHref`, `useNavigate`), plus two pure functions (`getHrefFormatter`, `constructInternalLink`) that the hooks build on. It's used in ~60 files across `client-frontends`.
+
+## 2. `LinkProvider` — injecting the host's router
+
+`LinkProvider` takes exactly three props and puts them on context (`src/frontend/grease/link/src/link-provider.tsx`):
+
+| Prop | Type | What it is |
+|---|---|---|
+| `siteSlug` | `string` | Locale/site path prefix, e.g. `se` — prepended to internal links |
+| `LinkComponent` | `LinkComponentType` | The host router's link, accepting `{ href, context?, ...anchorProps }` |
+| `navigate` | `NavigateFunction` | `(url: string) => void` — programmatic navigation |
+
+Stronger wires it from BFF and router data (`client-frontends/stronger/app/project/bootstrap.tsx`):
+
+```tsx
+import { LinkProvider, LinkProviderProps } from "@made-people/grease-link";
+
+const linkProviderNavigateFunction = (url: string) => {
+  const [path, params] = url.split("?");
+  navigate({ pathname: path, search: params });
+};
+
+const LinkComponent = isInsideStoryblokPreview
+  ? StoryblokPreviewLink
+  : StrongerLink;
+
+const linkProviderProps: LinkProviderProps = {
+  siteSlug: settingsAndContentResponse.frontendContext.siteSlug,
+  LinkComponent,
+  navigate: linkProviderNavigateFunction,
+};
+```
+
+`StrongerLink` is the client's own thin wrapper over the router link (`client-frontends/stronger/app/project/components/stronger-link.tsx`):
+
+```tsx
+import { LinkComponentType } from "@made-people/grease-link";
+import { GreaseRemixLink } from "@made-people/grease-remix";
+import { overlayEventEmitter } from "@made-people/blueprint-overlay";
+
+export const StrongerLink: LinkComponentType = (props) => {
+  return (
+    <GreaseRemixLink
+      {...props}
+      viewTransition={false}
+      onClick={(e) => {
+        overlayEventEmitter.emit("close", {});
+        props.onClick && props.onClick(e);
+      }}
+    />
+  );
+};
+```
+
+This is the key pattern: the client decides *which* link to inject (real router link vs. a Storyblok-preview link), and every grease component below gets that choice for free. The `LinkComponentProps` also carry an optional `context` field (`"product-card"`, `"breadcrumb"`, `"mini-cart"`, etc.) so projects can vary link behaviour per use site.
+
+## 3. `useLink` / `useHref` / `useNavigate`
+
+Three consumer hooks, each throwing a named error if used outside `LinkProvider`.
+
+| Hook | Returns | Use when |
+|---|---|---|
+| `useLink(options?)` | A link component (`LinkComponentType`) | Rendering an anchor in a grease/Blueprint component |
+| `useHref()` | `(link: string) => string` formatter | You need a raw `href` string (passing to a third-party widget, building `srcSet`-style attributes, etc.) |
+| `useNavigate()` | `(url: string) => void` | Programmatic navigation after an action |
+
+`useLink` returns a stable component that auto-formats its `href` by default:
+
+```tsx
+import { useLink } from "@made-people/grease-link";
+
+export const AllReviewsBadge = ({ link }: Props) => {
+  const Link = useLink();
+  const href = link?.url ?? link?.cached_url;
+  return <Link href={href}>All reviews</Link>;
+};
+```
+
+Pass `useLink({ autoFormatHref: false })` to get a link that uses the host `LinkComponent` directly with no slug-prefixing or param-forwarding — for when you already have a fully-formed URL.
+
+`useHref` gives you the formatter function itself, for when you need the string rather than an element:
+
+```tsx
+import { useHref } from "@made-people/grease-link";
+
+const href = useHref();
+// href("account/orders") -> "/se/account/orders?utm_source=..."
+```
+
+## 4. Href formatting — `getHrefFormatter` and `constructInternalLink`
+
+`useHref` is a thin React wrapper around `getHrefFormatter`, a pure function (`src/frontend/grease/link/src/get-href-formatter.ts`). The rules:
+
+- **External URLs pass through.** Anything matching `^(https?:|mailto:|tel:)` is returned verbatim — no slug, no params appended.
+- **Internal links get the slug prefix.** `constructInternalLink(link, siteSlug)` joins `siteSlug` and the path, guaranteeing exactly one leading slash. A link that already starts with `/` is treated as absolute and left as-is (no slug prefix).
+- **Whitelisted params get merged onto internal links.** Attribution params captured by the provider are set onto the link's query string.
+
+```ts
+export function constructInternalLink(link: string, siteSlug: string): string {
+  if (link.startsWith("/")) {
+    return link;
+  }
+  return [siteSlug, link]
+    .filter((x) => !!x)
+    .join("/")
+    .replace(/^\/?/, "/");
+}
+```
+
+`constructInternalLink` and `getHrefFormatter` are exported so you can format outside React (loaders, tests, server code) where the hooks aren't available.
+
+## 5. Whitelisted query params — UTM / click-id forwarding
+
+When a user lands via `?utm_source=newsletter&gclid=…`, those params live in the entry URL. Client-side navigation throws them away unless something carries them forward. `WhitelistedQueryParamsProvider` is that something (`src/frontend/grease/link/src/whitelisted-query-params-provider.tsx`).
+
+It reads a fixed set of keys off the current URL and exposes only those on context; `getHrefFormatter` then re-appends them to every internal link. The default whitelist (`defaultWhitelistedQueryParamKeys`):
+
+| Group | Keys |
+|---|---|
+| UTM | `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term`, `utm_id`, `utm_campaign_id`, `utm_gads` |
+| Click IDs | `fbclid`, `gclid`, `ttclid`, `msclkid`, `_kx` |
+| Other | `dema_id` |
+
+Mount it above your app, passing the current search params. You can extend the default list rather than replace it (`client-frontends/stronger/app/project/bootstrap.tsx`):
+
+```tsx
+import {
+  WhitelistedQueryParamsProvider,
+  WhitelistedQueryParamsProviderProps,
+  defaultWhitelistedQueryParamKeys,
+} from "@made-people/grease-link";
+
+const whitelistedQueryParamsProviderProps: WhitelistedQueryParamsProviderProps = {
+  urlSearchParams: new URLSearchParams(location.search),
+  whitelistedQueryParamKeys: [
+    ...defaultWhitelistedQueryParamKeys,
+    "countryCode", // persist site setting across navigation
+  ],
+};
+
+<WhitelistedQueryParamsProvider {...whitelistedQueryParamsProviderProps}>
+  {children}
+</WhitelistedQueryParamsProvider>;
+```
+
+The provider is **optional**. `useWhitelistedQueryParams` falls back to an empty `URLSearchParams` when no provider is mounted, so links still format correctly — they just don't forward attribution. That fallback is the feature flag: mount it and params flow, leave it out and they don't.
+
+## Render tree
+
+```
+WhitelistedQueryParamsProvider     ← captures UTM / click-ids from the landing URL
+  └─ LinkProvider                  ← injects siteSlug + LinkComponent + navigate
+       ├─ useLink()    → <Link>     ← auto-formats href, forwards params
+       ├─ useHref()    → formatter  ← string href for widgets / loaders
+       └─ useNavigate() → navigate  ← programmatic navigation
+```
+
+`WhitelistedQueryParamsProvider` goes above `LinkProvider` — `useHref` reads both contexts and merges them.
+
+## Gotchas
+
+- **Hooks throw outside the provider.** `useLink`, `useHref`, and `useNavigate` each throw a named error if there's no `LinkProvider` above them. No silent `undefined` — the error points straight at the missing provider.
+- **Absolute paths skip the slug.** `constructInternalLink` leaves any link starting with `/` untouched. If you pass `/account` expecting `/se/account`, you'll get `/account` instead — pass the path without a leading slash to get the slug prefix.
+- **External URLs never get UTM params.** `getHrefFormatter` returns `http`/`mailto`/`tel` links verbatim, by design — attribution params are only appended to internal links.
+- **No provider = no forwarding, not an error.** `useWhitelistedQueryParams` returns an empty `URLSearchParams` when `WhitelistedQueryParamsProvider` is absent. Links still work; UTM/click-ids just silently won't carry across navigation. If attribution is missing, check the provider is mounted.
+- **Replacing the whitelist drops the defaults.** Passing `whitelistedQueryParamKeys` *replaces* `defaultWhitelistedQueryParamKeys`. Spread the defaults in (`[...defaultWhitelistedQueryParamKeys, "yourKey"]`) unless you genuinely want to forward nothing else.
+- **`useLink({ autoFormatHref: false })` bypasses formatting.** The non-formatting variant uses the host `LinkComponent` directly — no slug prefix, no param forwarding. Only use it with URLs that are already complete.
+
+## Troubleshooting
+
+**"useLink/useHref/useNavigate must be used within a (Link)Provider"** — the component rendered above `LinkProvider`. Mount the provider near the root of your bootstrap, above the whole app shell, not inside a route.
+
+**Internal links lose their locale prefix** — the path was passed with a leading `/`, so `constructInternalLink` treated it as absolute and skipped the `siteSlug`. Drop the leading slash, or confirm `siteSlug` is set on the provider.
+
+**UTM params don't survive navigation** — `WhitelistedQueryParamsProvider` isn't mounted, or it's below the components rendering links. Mount it above `LinkProvider` and pass the current `location.search`.
+
+**A custom attribution param isn't forwarded** — it's not in the whitelist. Add it via `whitelistedQueryParamKeys`, spreading `defaultWhitelistedQueryParamKeys` first so you don't lose UTM/click-id forwarding.
+
+**Links render but don't navigate client-side** — your injected `LinkComponent` isn't the router link, or `navigate` wasn't wired. Check the `LinkProvider` props point at your real router link (e.g. `GreaseRemixLink`) and a working `navigate`.
+
+## Related
+
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — where providers mount in the bootstrap
+- [SEO Routes](./seo-routes) — how internal paths and slugs map to routes
+- [Implementing Product](./product) — Blueprint components that call `useLink`
+- [Grease Image](./image) — the sibling injection pattern for CDN image processors
+
+**Next:** [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [SEO Routes](./seo-routes) · [Getting Started](./getting-started)

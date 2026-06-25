@@ -213,7 +213,7 @@ From `client-frontends/miss-mary/app/services/centra/mappers/mm-product-extra-at
 import { centraCheckoutApiProductToGreaseProductExtraAttributes } from "@made-people/grease-centra";
 import type { CentraCheckoutApiMappers } from "@made-people/grease-centra";
 import { mmColorSwatchSchema } from "./schemas";
-import { ALGOLIA_OBJECT_ID_ATTRIBUTE_KEY } from "../constants";
+import { ALGOLIA_OBJECT_ID_ATTRIBUTE_KEY } from "@made-people/grease-algolia";
 
 export const mmProductExtraAttributes: CentraCheckoutApiMappers["centraCheckoutApiProductToGreaseProductExtraAttributes"] =
   (product) => {
@@ -274,7 +274,7 @@ Four things to notice:
 1. **The type annotation is load-bearing.** `CentraCheckoutApiMappers["centraCheckoutApiProductToGreaseProductExtraAttributes"]` gives you the exact signature of the mapper you're replacing — argument types, return type, everything.
 2. **Zod guards the custom Centra fields.** `product.color_swatch` and `product.color` are loose `any`s out of Centra — `safeParse` filters out bad shapes so the mapper never throws.
 3. **Each attribute is `{ attributeKey, attributeLabel, value, valueLabel }`.** That's the Grease `ProductExtraAttribute` shape — it gets rendered as-is by `ProductCard`, PDP blocks, and GTM mappers downstream.
-4. **Algolia's object ID is set here.** The search result hydration layer reads `product_algolia_object_id` off the extra attributes — if it's missing, the product won't sync into the Algolia adapter. Same pattern for Voyado IDs, Depict category IDs, etc.
+4. **Algolia's object ID is set here.** The search result hydration layer reads the `algolia_object_id` attribute (the `ALGOLIA_OBJECT_ID_ATTRIBUTE_KEY` constant from `@made-people/grease-algolia`) off the extra attributes — if it's missing, the product won't sync into the Algolia adapter. Same pattern for Voyado IDs, Depict category IDs, etc.
 
 ## 6. Wiring mappers into `CentraProvider`
 

@@ -354,30 +354,31 @@ The entire consumer surface:
 
 | Hook | Returns |
 |---|---|
-| `useSearchResultState()` | Full reducer state — items, facets, sort, loading, error |
-| `useSearchResultItems()` | Just the current page's items (most common) |
+| `useSearchResultState()` | Reducer state — `{ result }`, the full `SearchResult` (items, facets, sort live inside it) or `undefined` |
+| `useSearchResultItems()` | The current items as an array: `SearchResultItem[] \| undefined` (most common) |
 | `useSearchResultLoadMore()` | Fn to load the next page, appending to items |
 | `useSearchResultLoadPage()` | Fn to jump to a specific page |
 | `useFacets()` | `{ facets, toggleFacet, resetFacets, activeFacetValues }` |
-| `useSort()` | `{ sort, availableSorts, setSort }` |
+| `useSort()` | `{ sortAlternatives, toggleSort }` |
 | `useCurrentPaginationPage()` | Current 1-based page number |
 | `usePageIncrementHref()` | Build SSR-friendly pagination links |
-| `useCachedSearchResults()` | Raw React Query handle — for advanced cache inspection |
+| `useCachedSearchResults()` | `{ results, queryMethods }` — raw cache handle for advanced inspection |
 
 Example PLP (abridged):
 
 ```tsx
 export const ProductListingPage = () => {
-  const { items, isLoading } = useSearchResultItems();
+  const items = useSearchResultItems();
   const { facets, toggleFacet } = useFacets();
-  const { sort, availableSorts, setSort } = useSort();
+  const { sortAlternatives, toggleSort } = useSort();
 
-  if (isLoading) return <ProductListingSkeleton />;
+  // items is undefined until the first result resolves
+  if (!items) return <ProductListingSkeleton />;
 
   return (
     <Layout>
       <FacetSidebar facets={facets} onToggle={toggleFacet} />
-      <SortControl sort={sort} options={availableSorts} onChange={setSort} />
+      <SortControl options={sortAlternatives} onChange={toggleSort} />
       <ProductGrid items={items} />
       <Pagination />
     </Layout>
@@ -433,6 +434,8 @@ Mount in the client:
 ## Related
 
 - [Implementing Algolia](./algolia) — the Algolia adapter setup
+- [Implementing Depict](./depict) — the Depict search/reco adapter (Dedicated's vendor)
+- [Voyado Elevate](./voyado-elevate) — Elevate's recommendations, autocomplete, and analytics beyond the search adapter
 - [Centra Mappers](./centra-mappers) — the same mapper override pattern, for a different data source
 - [withManagedProps](./with-managed-props) — how adapter providers opt into runtime props
 - [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — where search providers sit in the stack

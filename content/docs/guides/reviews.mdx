@@ -1,0 +1,218 @@
+---
+title: Implementing Reviews
+description: Wire up Trustvoice (Testfreaks) or Trustpilot reviews in a client frontend, depending on the brand
+---
+
+## What you'll learn
+
+How to choose between the two review packages Gears ships — `@made-people/grease-trustvoice` (Testfreaks, used by Stronger and Dedicated) and `@made-people/grease-trustpilot` (used by Miss Mary) — and how each is wired into a brand: a vendor script plus per-brand fetchers for Trustvoice, a BFF-backed React context with paginating hooks for Trustpilot.
+
+## The four things to know
+
+1. **Two packages, two shapes.** Trustvoice is a vendor script loader plus stateless components and fetch utilities — there is no context provider. Trustpilot is a React context (`TrustpilotProvider`) with hooks that page through reviews via the BFF.
+2. **Trustvoice fetches per-brand.** Each brand owns a `trustvoice-config.ts` mapping country → Testfreaks endpoint, and resolves it with `resolveTrustvoiceEndpoint`. The package never hard-codes a URL.
+3. **Trustpilot needs the BFF.** `@made-people/grease-trustpilot` depends on `@made-people/gears-bff-client` and `@made-people/grease-bff` at runtime. The hooks call BFF fetchers; without a `bffClient` on the provider, pagination stops.
+4. **Both feed structured data.** Each package exposes a transform into rating/review JSON-LD shapes. See [Structured Data](./structured-data) for how that lands in the page.
+
+## 1. Which brand uses which vendor
+
+| Brand | Package |
+|---|---|
+| Stronger | `@made-people/grease-trustvoice` |
+| Dedicated | `@made-people/grease-trustvoice` |
+| Miss Mary | `@made-people/grease-trustpilot` |
+
+Pick the package the brand already uses — they are not interchangeable and have different integration models.
+
+## 2. Choosing a vendor
+
+| | Trustvoice (Testfreaks) | Trustpilot |
+|---|---|---|
+| Integration model | Vendor script + components + fetch utils | BFF-backed React context + hooks |
+| Provider | None — `TrustvoiceScriptLoader` only injects a `<script>` | `TrustpilotProvider` carries `bffClient`, `siteLanguage`, review data |
+| Where data comes from | `fetch()` straight to a per-brand Testfreaks JSON endpoint | BFF fetchers (`bffFetchTrustpilot…`) through `gears-bff-client` |
+| Pagination | None in the package | `useTrustpilotPagination` (two-tier: SSR cache, then BFF pages) |
+| Runtime deps | `react`, `react-dom` (peers only) | also `@made-people/gears-bff-client`, `@made-people/grease-bff` |
+| Structured data | `trustvoiceToStructuredData` | `transform-trustpilot-to-structured-data` |
+
+## 3. Trustvoice (Testfreaks)
+
+### Load the vendor script
+
+`TrustvoiceScriptLoader` injects a `<script>` into `<head>` once on mount (it dedupes on `src` and skips on the server), then renders its children unchanged. The brand resolves the script URL from its own endpoint map and mounts the loader high in the bootstrap.
+
+```tsx
+import {
+  TrustvoiceScriptLoader,
+  resolveTrustvoiceEndpoint,
+} from "@made-people/grease-trustvoice";
+import { STRONGER_HEAD_ENDPOINTS } from "./config/trustvoice-config";
+
+const trustvoiceScriptUrl = resolveTrustvoiceEndpoint(
+  STRONGER_HEAD_ENDPOINTS,
+  frontendContext.country,
+);
+
+<TrustvoiceScriptLoader scriptUrl={trustvoiceScriptUrl}>
+  {children}
+</TrustvoiceScriptLoader>;
+```
+
+Stronger does this in `client-frontends/stronger/app/project/bootstrap.tsx`; Dedicated in `client-frontends/dedicated/app/project/bootstrap/bootstrap.tsx`, importing `DEDICATED_HEAD_ENDPOINTS`.
+
+### Per-brand endpoint config
+
+Each brand ships `app/project/config/trustvoice-config.ts`. Stronger keeps three maps, all keyed by country with a `default`:
+
+```ts
+export const STRONGER_TRUSTVOICE_ENDPOINTS = {
+  SE: "https://js.testfreaks.com/onpage/stronger-se/reviews.json",
+  // …
+  default: "https://js.testfreaks.com/onpage/stronger-com/reviews.json",
+};
+export const STRONGER_HEAD_ENDPOINTS = {
+  SE: "https://js.testfreaks.com/onpage/stronger-se/head.js",
+  // …
+};
+export const STRONGER_TRUSTVOICE_SELLER_CLIENT_IDS = {
+  SE: "stronger-se",
+  // …
+};
+```
+
+`resolveTrustvoiceEndpoint(config, countryCode)` upper-cases the country, returns the matching entry, and falls back to `default` (or the first value) when there is no match.
+
+### The widget and the badge
+
+`TrustvoiceWidget` renders a `<div>`, builds a `.testfreaks-item` element inside it with `data-product-id` / `data-family-id`, and pushes `["load", modules]` onto `window.testFreaks`. It needs at least one of `productId` / `familyId` and no-ops when `disabled`.
+
+```tsx
+import { TrustvoiceWidget } from "@made-people/grease-trustvoice";
+
+<TrustvoiceWidget familyId={productData.productSku} />;
+```
+
+`TrustvoiceReviewsBadge` is a clickable wrapper: on click (or Enter/Space) it dispatches a custom event (`pdp:open-reviews` by default) and smooth-scrolls to the reviews container (`testfreaks-reviews` by default).
+
+### Fetch reviews and feed structured data
+
+The data utilities run in loaders, not components. `fetchTrustvoiceData` resolves the endpoint and `fetch()`es the Testfreaks JSON; `fetchTrustvoiceReviews` follows the response's `your_review_url`. `fetchTrustvoiceForProduct` chains both and pipes the result through `trustvoiceToStructuredData`. `fetchTrustvoiceSellerReviews` resolves a `clientId` config to the company/seller feed (it caches with a TTL). `injectTrustvoiceIntoProduct` merges `aggregateRating` and `reviews` onto a product object.
+
+```ts
+import {
+  fetchTrustvoiceForProduct,
+  fetchTrustvoiceSellerReviews,
+} from "@made-people/grease-trustvoice";
+
+trustvoiceData = await fetchTrustvoiceForProduct({
+  familyId: page.productData.productSku,
+  countryCode,
+  endpointConfig: STRONGER_TRUSTVOICE_ENDPOINTS,
+});
+
+trustvoiceSellerData = await fetchTrustvoiceSellerReviews({
+  countryCode,
+  clientIdConfig: STRONGER_TRUSTVOICE_SELLER_CLIENT_IDS,
+  cacheTtlMs: 10 * 60 * 1000,
+  maxReviews: 12,
+  aggregateScore: true,
+});
+```
+
+Real file: `client-frontends/stronger/app/project/loaders/stronger-loader.ts`, which only fetches product data when `page.pageType === "centraProductPage"`.
+
+## 4. Trustpilot
+
+### Mount the provider in bootstrap
+
+Miss Mary builds `trustpilotProviderProps` in `client-frontends/miss-mary/app/bootstrap.tsx` and wraps the tree in `TrustpilotProvider`. The provider carries the `bffClient`, the `siteLanguage` the hooks page with, and the (optionally lazy) review data.
+
+```tsx
+import { TrustpilotProvider, TrustpilotProviderProps } from "@made-people/grease-trustpilot";
+
+const trustpilotProviderProps: TrustpilotProviderProps = {
+  storeReviews: () => fetchTrustpilotStoreReviews(bffClient, storeReviewsFetchOptions),
+  siteLanguage: `${frontendContext.language}-${frontendContext.country}`,
+  bffClient,
+  storeReviewsFetchOptions,
+};
+
+<TrustpilotProvider {...trustpilotProviderProps}>
+  {children}
+</TrustpilotProvider>;
+```
+
+`productReviews` and `storeReviews` each accept `TrustpilotDisplayData`, `null`, or a `() => Promise<…>` thunk — the function form is resolved lazily inside `useTrustpilotReviews`.
+
+### Read with hooks
+
+All hooks read `TrustpilotContextValue` and throw via `useTrustpilotContext` if mounted outside the provider. They take a `"product" | "store"` mode (default `"product"`).
+
+| Hook | Returns |
+|---|---|
+| `useTrustpilotReviews(mode)` | The resolved `TrustpilotDisplayData` (or `null`) |
+| `useTrustpilotAverageRating(mode)` | `averageRating` (`0` when absent) |
+| `useTrustpilotReviewCount(mode)` | `totalReviews` (`0` when absent) |
+| `useTrustpilotReviewsList(mode, maxReviews?)` | The review array, optionally sliced |
+
+### Paginate with `useTrustpilotPagination`
+
+`useTrustpilotPagination` adds load-more on top. It is two-tier: it first hands out batches of `PER_PAGE` (12) from `availableReviews` (the SSR-prefetched list), then once that is exhausted it calls the BFF (`bffFetchTrustpilotStoreReviews` / `bffFetchTrustpilotProductReviews`) for further pages. `siteLanguage` is split to its base code before the request.
+
+```ts
+const { reviews, loadMore, canLoadMore, isLoading } = useTrustpilotPagination({
+  type: "product",
+  productSku: "12345",
+  initialReviews: serverReviews.slice(0, 12),
+  availableReviews: serverReviews,
+  totalReviews: 50,
+});
+```
+
+`loadMore` guards against double-loading (`isLoading` / `!hasMore`), and bails (logging an error and setting `canLoadMore` to `false`) when `bffClient` is missing or, for product reviews, when `productSku` is empty.
+
+### Transforms
+
+`transformTrustpilotProductReviewsToDisplay` / `transformTrustpilotStoreReviewsToDisplay` (from `transform-trustpilot-to-display-data`) map BFF responses into `TrustpilotDisplayData` (`averageRating`, `totalReviews`, `reviews`, `starDistribution`). `transform-trustpilot-to-structured-data` produces the JSON-LD shape (`ratingValue`, `reviewCount`, `reviews`, `bestRating`, `worstRating`) for [Structured Data](./structured-data).
+
+## 5. Per-brand wiring at a glance
+
+| Brand | Provider / loader | Brand wrappers |
+|---|---|---|
+| Stronger | `TrustvoiceScriptLoader` in `bootstrap.tsx`; fetchers in `stronger-loader.ts` | `app/project/components/trustvoice/*` |
+| Dedicated | `TrustvoiceScriptLoader` in `bootstrap/bootstrap.tsx` | `app/project/components/trustvoice/*` (incl. `TrustvoiceScript.tsx`) |
+| Miss Mary | `TrustpilotProvider` in `bootstrap.tsx` | `app/components/features/trustpilot/*` |
+
+Dedicated's `TrustvoiceScript.tsx` is a brand-local wrapper that pushes `["reset"]`, `["setFamilyId", …]`, an `onBadgeClick` handler, and `["load", ["badge", "reviews"]]` onto `window.testFreaks` directly, rather than using `TrustvoiceWidget`.
+
+## Gotchas
+
+- **No Trustvoice provider.** `TrustvoiceScriptLoader` only injects a script tag; it carries no config. Everything else (country → endpoint, fetching) is brand code.
+- **Trustvoice fetch utilities require `endpointConfig`.** `fetchTrustvoiceData` throws when it is missing, and returns `null` when neither `productId` nor `familyId` is supplied.
+- **`window.testFreaks` is the contract.** `TrustvoiceWidget` and brand scripts both push onto the same global queue. If the vendor script never loaded (no `scriptUrl`, server render), the queued commands never run.
+- **`useTrustpilot*` outside `TrustpilotProvider` throws.** `useTrustpilotContext` raises if there is no context above it.
+- **No `bffClient`, no pagination.** Past the SSR `availableReviews`, `useTrustpilotPagination` logs an error and sets `canLoadMore` to `false`.
+- **Product pagination needs a `productSku`.** An empty/whitespace SKU is rejected before the BFF call.
+- **`PER_PAGE` is fixed at 12.** The hook does not accept a page size; it batches in twelves regardless of `storeReviewsFetchOptions.perPage`.
+
+## Troubleshooting
+
+**Trustvoice widget renders an empty div** — the vendor script never loaded. Check that `resolveTrustvoiceEndpoint` returned a `head.js` URL for the country and that `TrustvoiceScriptLoader` is mounted above the widget.
+
+**Trustvoice structured data missing** — `fetchTrustvoiceForProduct` returns `null` when the API request fails or there is no `your_review_url`; an aggregate rating is only emitted when both a score and a non-zero review count are present.
+
+**Trustpilot reviews never load more** — `bffClient` is not on the provider, or (for products) `productSku` is empty. Both log to the console and stop pagination.
+
+**Trustpilot hooks throw `must be used within a TrustpilotProvider`** — the component is rendered outside the provider. Mount `TrustpilotProvider` above it in bootstrap.
+
+**Wrong-language Trustpilot reviews** — `siteLanguage` is split to its base code (`sv-SE` → `sv`) before the BFF call; make sure the provider's `siteLanguage` is set from `frontendContext`.
+
+## Related
+
+- [Product](./product) — where review widgets and aggregate ratings render
+- [Centra](./centra) · [Centra Mappers](./centra-mappers) — product SKU / family data the fetchers key on
+- [BFF](./bff) — backs the Trustpilot fetchers
+- [Structured Data](./structured-data) — both packages feed rating/review JSON-LD
+- [Yotpo Loyalty](./yotpo-loyalty) — another customer-engagement integration
+
+**Next:** [Structured Data](./structured-data) · [Product](./product) · [Anatomy of a Gears Client](./anatomy-of-a-gears-client)

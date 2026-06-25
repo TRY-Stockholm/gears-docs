@@ -1,0 +1,148 @@
+---
+title: Structured Data
+description: Emit schema.org JSON-LD from a Gears client — the provider + registry model, product mappers, and injecting WebSite, FAQ, breadcrumb, shipping and return-policy schemas into the document head
+---
+
+## What you'll learn
+
+How `@made-people/grease-structured-data` generates schema.org JSON-LD for a storefront: the two-tier context (`StructuredDataProvider` plus an inner registry), where you mount the single `GearsStructuredDataHeadTag` that renders every script into `<head>`, how product data is mapped from Gears or Centra into `Product`/`ProductList` markup, and how feature components inject extra schemas (WebSite, FAQ, breadcrumbs) plus shipping and return-policy details.
+
+## 1. Concepts
+
+The package produces schema.org markup as `<script type="application/ld+json">` tags via [`react-schemaorg`](https://www.npmjs.com/package/react-schemaorg)'s `JsonLd`. The schemas it can emit are enumerated in `StructuredDataScriptName` (`src/context/gearsStructuredDataContext.tsx`):
+
+| Script name | When it's emitted |
+|---|---|
+| `Product` | A single product, on a PDP |
+| `ProductList` | An `ItemList` of products (listing pages); suppressed when a PDP product is present |
+| `FAQPage` | Via `useInjectFAQPage` from a CMS page |
+| `WebSite` | Via `useInjectWebSite`, usually once site-wide |
+| `MerchantReturnPolicy` | Folded into each product Offer from provider settings |
+| `ShippingRateSettings` | Folded into each product Offer from provider settings |
+
+It uses a **two-tier context** (`src/context/structured-data-provider.tsx`):
+
+- **`StructuredDataProvider`** carries the static inputs — `mappers`, `pdpProduct`, a `context` object (`currencyCode`, `baseUrl`, `siteSlug`, `country`, `currentPath`), `breadCrumbs`, and the optional `offerShippingDetailsSettings` / `merchantReturnPolicySettings`.
+- Inside it sits **`GearsStructuredDataContextProvider`**, a small registry holding a `StructuredDataScripts` map keyed by `StructuredDataScriptName`. Injector hooks call `addToScripts(name, node)` to register a named script; `GearsStructuredDataHeadTag` reads the map and renders them.
+
+The split matters: injector components can live anywhere in the tree (a CMS block, a PDP) and register their script, while a single mount point collects everything into the head.
+
+## 2. Wiring
+
+Two mounts. The provider wraps the app; the head tag renders the collected scripts.
+
+Stronger builds a `StructuredDataProviderProps` object in its bootstrap (`client-frontends/stronger/app/project/bootstrap.tsx`) and spreads it onto the provider:
+
+```tsx
+const structuredDataProviderProps: StructuredDataProviderProps = {
+  mappers: {
+    greaseProductToStructuredDataProduct:
+      greaseProductToUnformattedStructuredDataProduct,
+  },
+  context: {
+    country: frontendContext.country,
+    currencyCode: frontendContext.currencyCode,
+    siteSlug: frontendContext.siteSlug,
+    baseUrl: frontendContext.baseUrl,
+    currentPath: location.pathname,
+  },
+  pdpProduct:
+    page.pageType === "centraProductPage"
+      ? defaultMapCentraProductToStructuredDataProduct(page.productData)
+      : undefined,
+  breadCrumbs: page.breadCrumbs,
+  offerShippingDetailsSettings,
+  merchantReturnPolicySettings,
+};
+```
+
+The head tag goes in the document `<head>` in `root.tsx`, after `<Meta />` and `<Links />` (`client-frontends/stronger/app/root.tsx`, and the same in `dedicated` and `miss-mary`):
+
+```tsx
+import { GearsStructuredDataHeadTag } from "@made-people/grease-structured-data";
+
+<GearsStructuredDataHeadTag
+  offerShippingDetailsSettings={offerDetailsSettings}
+/>;
+```
+
+`GearsStructuredDataHeadTag` renders the registry's scripts plus four built-in components directly: `StructuredDataBreadcrumbs`, `StructuredDataShippingDetails`, `StructuredDataShippingRateSettings`, and `StructuredDataProducts` (fed `pdpProduct`). Breadcrumbs, shipping and the PDP product therefore need **no** injector hook — they render from provider data alone.
+
+> Peer deps are `react`, `react-dom`, and `zod` (see `package.json`). The package also pulls in `@made-people/grease-product` and `@made-people/grease-bread-crumbs` for its input types.
+
+## 3. Providing product data
+
+JSON-LD is built from `UnformattedStructuredDataProduct` (`src/hooks/useStructuredDataProduct.ts`) — a flat shape with `sku`, `name`, `imageUrls`, `urlSlug`, and a `variants[]` array (each with `sku`, `size`, optional `ean`, `priceAsNumber`, `quantity`, `sizeSystem`). Two mappers produce it:
+
+| Mapper | Input | Use |
+|---|---|---|
+| `greaseProductToUnformattedStructuredDataProduct` | a Gears `Product` (`simple` / `with_variants` / `bundle`) | when you have a fully mapped Gears product |
+| `defaultMapCentraProductToStructuredDataProduct` | raw Centra product data (`unknown`) | when you have the Centra page payload |
+
+`defaultMapCentraProductToStructuredDataProduct` validates its input against a Zod schema and returns `undefined` (after a `console.warn`) if it doesn't match — so a shape mismatch silently drops the markup rather than throwing.
+
+The Gears mapper is registered on the provider's `mappers.greaseProductToStructuredDataProduct`; the Centra mapper is called directly to produce `pdpProduct` (see §2). Clients can wrap either: Miss Mary's `mmCentraProductToStructuredDataProduct` (`client-frontends/miss-mary/app/services/centra/mappers/mm-centra-product-to-structured-data-product.ts`) calls the default mapper and then localizes each variant's `size` and `sizeSystem` per country.
+
+`useStructuredDataProduct` then turns the unformatted product into schema.org markup: each variant becomes a `ProductModel` with an `Offer`; the top-level product gets an `AggregateOffer` spanning the variant price range (or a plain `Offer` when there are no variants). A missing `sku` drops the product; a variant with no `sku` is skipped.
+
+## 4. Injecting additional schemas
+
+Anything not covered by the provider's built-ins is added by an **injector hook**. Each hook builds a value, validates it, and calls `useStructuredDataInjector(value, name)` which registers the script once via `useEffectOnce` (`src/hooks/injectors/useStructuredDataInjector.tsx`). The component itself returns `null` — it exists only to inject.
+
+- **`useInjectWebSite(config)`** — builds a `WebSite` schema (name, url, optional `SearchAction`, logo, `sameAs`). Miss Mary mounts a `MmWebsiteStructuredData` component in the body that assembles a `WebSiteConfig` and calls the hook (`client-frontends/miss-mary/app/components/structured-data/mm-website-structured-data.tsx`).
+- **`useInjectFAQPage(questionsAndAnswers)`** — takes `{ q, a }[]` and emits an `FAQPage`. Stronger's `StrongerFaqStructuredData` walks a Storyblok story for accordion items and feeds them in (`client-frontends/stronger/app/project/components/global/stronger-faq-structured-data.tsx`).
+- **`useInjectStructuredDataProducts(unformattedProducts)`** — registers a `Product` or `ProductList` from the registry (rather than the provider's `pdpProduct` slot). It picks the script name by inspecting whether the result is a single product or a list.
+- **`useStructuredDataInjector(value, name)`** — the low-level primitive the others build on; use it directly for a custom schema type.
+
+Breadcrumbs are not injected — `StructuredDataBreadcrumbs` reads `breadCrumbs` from the provider and emits a `BreadcrumbList`. Note its `ListItem` `position` is **0-indexed** (`position: i`), unlike the product `ItemList` which is 1-indexed.
+
+## 5. Shipping & merchant-return-policy settings
+
+These come from the provider, not an injector. `offerShippingDetailsSettings` and `merchantReturnPolicySettings` are arrays validated by the Zod schemas in `src/types/OfferShippingDetailsSettings.ts` and `src/types/MerchantReturnPolicySettings.ts`. The clients resolve them from settings hooks (`use-offer-shipping-details-settings.ts`, `use-merchant-return-policy-settings.ts`).
+
+`useStructuredDataProduct` folds them into the product's offers:
+
+- `useStructuredDataOfferShippingDetails` builds a `Map` keyed by country and matches the current `context.country`, attaching `OfferShippingDetails` (rate, destination, delivery time) to each variant `Offer`.
+- `useStructuredDataMerchantReturnPolicy` takes the **first** settings entry, falling back to `context.country` for `applicableCountry`, and sets `hasMerchantReturnPolicy` on the product.
+
+Note that `GearsStructuredDataHeadTag` takes `offerShippingDetailsSettings` as a prop too (for its standalone `StructuredDataShippingDetails` / `StructuredDataShippingRateSettings` components), so pass the same value there as you give the provider.
+
+## 6. Reviews & ratings on PDPs
+
+`UnformattedStructuredDataProduct` carries optional `aggregateRating` and `reviews[]`. These are mapped into `aggregateRating` and `review[]` on the product **only for a single product** — `useStructuredDataProduct` calls the mapper with `includeReviews: true` for a PDP product and `false` for every item in a `ProductList`. So ratings and reviews appear on PDPs but never on listing markup. Populating these fields is the integration's job (e.g. a reviews provider); see [Reviews](./reviews).
+
+## Gotchas
+
+- **`JsonLd` won't update on async data — remount hack.** `StructuredDataProducts` bumps a `keyRef` whenever the product changes and uses it as the `key`, forcing a remount. This is a documented workaround for `react-schemaorg` not updating the DOM script tag when props change; don't remove it.
+- **Inject-once.** Injector hooks register through `useEffectOnce`, so a script is added once and not re-added on re-render. Changing the input after the first effect won't re-inject.
+- **Single slot per name.** The registry holds one node per `StructuredDataScriptName`. Registering the same name twice **overwrites** the earlier node and logs `console.info("Structured data script already exists, overwriting it...")`. Two FAQ injectors on one page clobber each other.
+- **ProductList suppressed on PDPs.** When `pdpProduct` is set, `GearsStructuredDataHeadTag` filters out any `ProductList` script so a PDP doesn't emit both.
+- **Reviews only on PDPs.** Listing items are mapped with `includeReviews: false`; `aggregateRating`/`review` never appear in `ProductList`.
+- **Silent Zod drop.** The Centra mapper, `WebSite`, `FAQPage`, and the settings types all validate and return `undefined` (with a `console.warn`) on a bad shape — markup just goes missing rather than erroring. Check the console.
+- **Breadcrumb positions are 0-indexed.** `StructuredDataBreadcrumbs` emits `position: i` starting at 0, where the product `ItemList` starts at 1.
+- **Return policy uses only the first entry.** `useStructuredDataMerchantReturnPolicy` reads `settings[0]`; extra entries in the array are ignored.
+
+## Troubleshooting
+
+**No product JSON-LD on a PDP** — confirm `pdpProduct` is set on the provider (only for `centraProductPage`) and that the mapper returned a value. A missing `sku`, or Centra data that fails the Zod schema, yields `undefined`. Check for a `console.warn` from the mapper or `useStructuredDataProduct`.
+
+**WebSite or FAQ markup missing** — the config failed validation (`isWebSite` / `isFAQPage`) and the hook returned `undefined`. Look for `[useInjectWebSite]` / `[useInjectFAQPage]` warnings. Also confirm the injector component is actually mounted under the provider.
+
+**Two scripts of the same type fight** — only one survives per `StructuredDataScriptName`. Watch for the "already exists, overwriting" `console.info`; consolidate to a single injector.
+
+**Shipping/return details don't appear in offers** — the settings array didn't validate, or no entry's `countries` includes `context.country`. The shipping map is keyed by country and skips non-matching entries.
+
+**Markup doesn't update after a client-side navigation** — the registry and `JsonLd` remount handle this for the PDP product, but injector hooks are inject-once. A schema that should change per route needs its component to remount (e.g. keyed by route).
+
+## Related
+
+- [Implementing Centra](./centra) and [Centra Mappers](./centra-mappers) — where Centra product data originates
+- [Product](./product) — the Gears `Product` shape the Gears mapper consumes
+- [Reviews](./reviews) — populates `aggregateRating` and `reviews` for PDP markup
+- [Storyblok](./storyblok) — CMS source for FAQ injection
+- [SEO Routes](./seo-routes) — the broader SEO surface this complements
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — where bootstrap and `root.tsx` fit
+
+**Next:** [Reviews](./reviews) · [SEO Routes](./seo-routes) · [Centra Mappers](./centra-mappers)
+</content>
+</invoke>

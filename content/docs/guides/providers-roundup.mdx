@@ -1,0 +1,117 @@
+---
+title: Small Context Providers
+description: The thin context providers you'll see wired into every Gears client — translations, countries and languages, sites, breadcrumbs, and the geo-redirect banner
+---
+
+## What you'll learn
+
+The handful of small `@made-people/grease-*` packages that every client mounts near the root: what each one does, what it exports, and how it's wired. None of them fetch — they take resolved data as props and hand it back through a hook. Each throws if its hook is called outside the provider.
+
+## Translations
+
+`@made-people/grease-translations` — key → value lookup with `{placeholder}` interpolation that also handles JSX. The most-used of these providers; almost everything user-facing reads from it.
+
+- `TranslationsProvider` — takes a single `value: TranslateFunction` prop and exposes it via context.
+- `useTranslate()` — returns the `TranslateFunction`. Call `t("cart.empty")` or `t("greeting", { name })`. When a `format` value is a `JSX.Element`, the call returns a JSX fragment instead of a string.
+- `createTranslateFunction(translations)` — builds the function from a flat `{ key: string }` map (the BFF's `settingsAndContentResponse.translations`). Unknown keys fall back to the key itself; unmatched `{placeholder}` tokens are left in place. Throws if the map isn't a string→string object.
+- `createFallbackTranslator(translate)` — wraps `translate` to return a field when it's already a string or a valid React element, otherwise translating a fallback key.
+
+Lookup by language is assumed done already — the provider only ever sees the resolved map for the current locale.
+
+```tsx
+import {
+  TranslationsProvider,
+  createTranslateFunction,
+  type TranslateFunction,
+} from "@made-people/grease-translations";
+
+const translate: TranslateFunction = createTranslateFunction(
+  settingsAndContentResponse.translations,
+);
+
+<TranslationsProvider value={translate}>{children}</TranslationsProvider>;
+```
+
+## Countries and languages
+
+`@made-people/grease-countries-and-languages` — the source of truth for the current market and locale, and the list of available ones.
+
+- `CountriesAndLanguagesProvider` — props: `countries`, `languages`, `currentCountryCode`, `currentLanguageCode`, and an `updateCountryAndLanguage` callback.
+- `useCountriesAndLanguages()` — returns that context value, including `updateCountryAndLanguage(newCountryCode, newLanguageCode, fullPath)` to switch market and navigate.
+- Types: `Country` (`countryCode`, `name`, `languageCode`, `marketId`, `states`), `Language` (`languageCode`, `name`), and `CountryCode` — a union of lowercase ISO country codes.
+
+Clients usually wrap this in their own provider (e.g. `StrongerCountriesAndLanguagesProvider`) that supplies the data and the navigation callback.
+
+## Sites
+
+`@made-people/grease-sites` — a read-only list describing every site (storefront) the deployment serves.
+
+- `SitesProvider` — takes a `sites: SitesProviderSite[]` prop.
+- `useSites()` — returns that `SitesProviderSite[]`.
+- `SitesProviderSite` type: `countryCodes: string[]`, `currencyCode: string`, and `siteSlugs: { languageCode; siteSlug }[]` — the per-language URL slug for each site.
+
+Used for country/language switchers and for building cross-site links.
+
+## Breadcrumbs
+
+`@made-people/grease-bread-crumbs` — carries the breadcrumb trail for the current page down to whatever renders it.
+
+- `BreadCrumbsProvider` — takes a `breadCrumbs: BreadCrumb[]` prop. Set it per route.
+- `useBreadCrumbs()` — returns the `BreadCrumb[]`.
+- `BreadCrumb` type: `{ label: string; slug: string }`.
+
+Routes mount it with the trail they've computed; the breadcrumb component reads it. No transformation happens in between.
+
+```tsx
+import { BreadCrumbsProvider } from "@made-people/grease-bread-crumbs";
+
+<BreadCrumbsProvider breadCrumbs={breadCrumbs}>{children}</BreadCrumbsProvider>;
+```
+
+## Geo-redirect banner
+
+`@made-people/grease-geo-redirect-banner` — detects the visitor's country by GeoIP, compares it to the current market, and (on mismatch) signals that a dismissable "switch country" banner should show. Used by Stronger.
+
+- `GeoRedirectBannerProvider` — optional `dismissTTL` (seconds, defaults to one month) and `onSwap` callback. Reads `useCountriesAndLanguages()`, so it must sit **below** that provider.
+- `useGeoRedirectBanner()` — returns `{ isLoading, showBanner, detectedCountryCode, detectedCountry, currentCountry, handleStay, handleSwap, dismiss }`. Your banner component renders from this; the package ships the logic, not the UI.
+- `useGeoIpDetection({ currentCountryCode, countries, dismissTTL })` — the lower-level hook the provider uses: fetches GeoIP, compares, returns `{ isLoading, detectedCountryCode, showBanner }`.
+- `fetchGeoIp()` — `GET https://api.country.is/`, Zod-validated to `{ ip, country }`; returns `undefined` on failure.
+- `GEO_REDIRECT_BANNER_STORAGE_KEY` (`"geo_redirect_banner_dismissed"`) — the localStorage key holding the dismissal flag with its TTL.
+
+`handleSwap()` calls `onSwap(countryCode)` when provided, otherwise falls back to `updateCountryAndLanguage` for the detected country. `handleStay()` and `dismiss()` write the dismissal flag so the banner stays hidden until the TTL expires.
+
+```tsx
+import { GeoRedirectBannerProvider } from "@made-people/grease-geo-redirect-banner";
+
+<GeoRedirectBannerProvider dismissTTL={60 * 60 * 24 * 30}>
+  {children}
+</GeoRedirectBannerProvider>;
+```
+
+## Gotchas
+
+- **Every hook throws outside its provider.** `useTranslate`, `useCountriesAndLanguages`, `useSites`, `useBreadCrumbs`, and `useGeoRedirectBanner` all throw rather than return `undefined`. Mount the provider above the consumer.
+- **These providers don't fetch (except the banner).** They take resolved data as props. Translations, sites, and breadcrumbs come from the BFF/route data already shaped — locale lookup happens before the provider sees anything. Only the geo-redirect banner makes a network call (to `api.country.is`).
+- **Geo-redirect banner depends on countries-and-languages.** It calls `useCountriesAndLanguages()` internally, so it has to be nested inside `CountriesAndLanguagesProvider` — and it only shows when the detected country both differs from the current one *and* exists in the `countries` list.
+- **`CountryCode` is lowercase; GeoIP returns uppercase.** `fetchGeoIp` yields an uppercased country (e.g. `"SE"`); the detection hook compares against `currentCountryCode` as-is. Keep the casing of values you feed the provider consistent.
+- **Translations fall back silently.** A missing key renders the key string; an unmatched `{placeholder}` renders literally. Neither throws, so typos show up as raw keys in the UI, not errors.
+- **JSX in translations changes the return type.** `t(key, { x: <a /> })` returns a JSX fragment, not a string — don't pass it where a plain string is required (e.g. an `alt` attribute).
+
+## Troubleshooting
+
+**"useX must be used within a Provider" error** — the consumer rendered above the provider, or the provider isn't mounted on that route. Move it up the tree.
+
+**Translation shows the raw key** — the key isn't in `settingsAndContentResponse.translations` for the current locale, or `createTranslateFunction` received an empty/wrong map. Confirm the BFF returned translations and the right language resolved.
+
+**Geo banner never appears** — check, in order: the dismissal flag in localStorage (`geo_redirect_banner_dismissed`) is still within TTL; `fetchGeoIp` succeeded (it returns `undefined` on error and the banner stays hidden); the detected country differs from the current one; and the detected country exists in the provider's `countries` list.
+
+**Geo banner appears for the current country** — country-code casing mismatch between `currentCountryCode` and the uppercased GeoIP result. Normalize both sides.
+
+## Related
+
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — where these providers sit in the bootstrap tree
+- [Getting Started](./getting-started) — installing and wiring grease packages
+- [BFF](./bff) — where translations, countries, and sites data is shaped
+- [SEO Routes](./seo-routes) — where breadcrumb trails are computed per route
+
+**Next:** [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [BFF](./bff) · [Image](./image)

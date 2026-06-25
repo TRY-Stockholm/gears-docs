@@ -247,7 +247,7 @@ Inside, the controller:
 
 4. Returns `{ content, contentType: "application/xml", statusCode: 200 }`.
 
-The sitemap index aggregates all per-market sitemaps: `/sitemap/products/miss-mary-se`, `/sitemap/links/miss-mary-se`, one pair per configured market.
+The sitemap index (`getGoogleSitemapIndex`) emits just two child entries built off `frontend.fallbackBaseUrl` — `/sitemap/products` and `/sitemap/links` — not one pair per market. The per-market slug is resolved downstream when each child sitemap is requested.
 
 ## 7. Per-client response transforms
 
@@ -338,5 +338,6 @@ Keep the four layers separate. Don't put BFF-aware logic in the Vite config. Don
 - [Implementing Storyblok](./storyblok) — where story / page URLs come from
 - [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — the route tree that sits next to raw-response routes
 - [Product Feeds](./feeds) — outbound product feeds (Algolia, Google Shopping) — the non-XML counterpart to sitemaps
+- [Structured Data](./structured-data) — the other half of on-page SEO: schema.org JSON-LD emitted from the client
 
 **Next:** [Image](./image) · [Search](./search) · [Centra Mappers](./centra-mappers)

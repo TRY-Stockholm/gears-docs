@@ -1,0 +1,235 @@
+---
+title: Implementing Depict
+description: Wire up Depict as the grease-search vendor for listings, search, autocomplete, and recommendations — the live search adapter for the Dedicated client
+---
+
+## What you'll learn
+
+How to mount `@made-people/grease-depict` so a client reaches Depict's V3 API for category listings, text search, autocomplete suggestions, and recommendation blocks — all behind the same `grease-search` hooks every other vendor uses.
+
+## The four things to know
+
+1. **Depict is a `grease-search` adapter.** It implements the `SearchResultMethods` contract and ships a `DepictSearchResultsProvider`, a vendor config provider (`DepictProvider`), and a product mapper. The adapter pattern itself is documented in [Search Architecture](./search) — this guide covers the Depict specifics.
+2. **One vendor config carries everything.** `DepictProvider` holds a `searchContext` (`{ market, merchant, locale, session_id }`) and `mappers.product`. Both the search client and the autocomplete client read it from context.
+3. **Depict implements real sorting — unlike Elevate.** `DepictSearchResultsProvider` wires up `setSortOrder` (Depict accepts a sort at query time), where Elevate's adapter no-ops it.
+4. **Recommendations are a separate, stripped-down provider.** `DepictRecommendations` fetches one batch — no pagination, no facets, no sort. The other three providers cover listings and search.
+
+## 1. Install
+
+```bash
+# Inside the monorepo
+rush add -p @made-people/grease-depict
+
+# Outside the monorepo
+pnpm add @made-people/grease-depict
+```
+
+Peer deps: `@made-people/functions-crc32`, `@made-people/grease-order`, `react`, `react-dom`, `zod`.
+
+> **Heads up — implicit deps.** `@made-people/grease-cart` and `@made-people/grease-product` are not declared peer dependencies, but `DepictNotifications` subscribes to their event emitters and `DepictRecommendations` reads `useMaybeProductBase()` / `useCartState()` at runtime. Add them to your consumer app so the emitters and hooks are present.
+
+## 2. `DepictProvider` — vendor config
+
+`DepictProvider` is the Depict equivalent of `ElevateProvider`: it holds the per-request `searchContext` and the product mapper, mounts `DepictNotifications`, and exposes two hooks.
+
+```tsx
+import { DepictProvider, type DepictProviderProps } from "@made-people/grease-depict";
+
+const props: DepictProviderProps = {
+  searchContext: {
+    market: country.toLocaleLowerCase(),
+    merchant: depictMerchant,
+    locale: getDepictLocaleFromLanguageCode(language),
+    session_id: centraTokenHandler.getToken(),
+  },
+  mappers: { product: mapDepictDisplayToProduct },
+};
+```
+
+| Field | Meaning |
+|---|---|
+| `searchContext.market` | Depict market (lower-cased Centra country) |
+| `searchContext.merchant` | Depict merchant ID (e.g. `"dedicated"`) |
+| `searchContext.locale` | Depict locale (`sv_SE`, `de_DE`, `en_GB`, …) — mapped from the frontend language code |
+| `searchContext.session_id` | Centra token, used to stitch tracking events to a session (`undefined` is allowed) |
+| `mappers.product` | `(display: unknown) => Product \| undefined` — turns a Depict display into a Grease product |
+
+Two hooks read this context:
+
+- `useDepictSearchContext()` → the `searchContext`
+- `useDepictMappers()` → the `mappers`
+
+Both throw if called outside `DepictProvider`. The `searchContext` is merged into every V3 request body by `DepictSearchClient`, so it never has to be passed per query.
+
+Dedicated wires this in `client-frontends/dedicated/app/project/bootstrap/depict/depict-bootstrap.tsx` via a `<DepictBootstrap>` wrapper that maps `frontendContext` → `market`/`locale`, the Centra token → `session_id`, and sets `mappers.product = mapDepictDisplayToProduct`. It then nests `DepictAutoCompleteProvider` inside.
+
+## 3. `DepictSearchResultsProvider` — listings & search pages
+
+The per-query adapter. It builds the four `SearchResultMethods` from hooks (`useDepictFetchSearchResult`, `useDepictLoadPage`, `useDepictSetFacets`, `useDepictSetSortOrder`) and wraps children in `CachedSearchResultsProvider` from `grease-search`. Unlike Elevate, `setSortOrder` is a real implementation.
+
+The query is a Zod discriminated union with two members:
+
+| `type` | V3 endpoint | Use case |
+|---|---|---|
+| `listing-page` | `POST /listings/{listing_id}/products` | Category / brand pages |
+| `search-page` | `POST /search/results` | Text-query search results |
+
+```tsx
+import {
+  DepictSearchResultsProvider,
+  type DepictSearchResultQuery,
+} from "@made-people/grease-depict";
+
+const query: DepictSearchResultQuery = {
+  type: "search-page",
+  payload: { query: searchParams.get("q") || "" },
+};
+
+<DepictSearchResultsProvider
+  query={query}
+  mode={initialSearchResult ? "SSR" : "CLIENT"}
+  initialSearchResult={initialSearchResult}
+>
+  <Search searchTerm={q} />
+</DepictSearchResultsProvider>;
+```
+
+Mount inside `<SearchProvider>` from `grease-search`. The tree:
+
+```
+SearchProvider                  ← from grease-search
+  └─ DepictProvider             ← searchContext + product mapper
+      └─ DepictSearchResultsProvider  ← per-query SearchResultMethods adapter
+          └─ children (ProductList, facets, pagination)
+```
+
+Dedicated mounts this in `client-frontends/dedicated/app/gears/routes/search-page-route.tsx`, reading `q` from the URL.
+
+### SSR mode & hydration
+
+`DepictSearchResultsProvider` forwards `mode` (`"SSR" | "CLIENT"`) and `initialSearchResult` straight to `CachedSearchResultsProvider`. For server prefetch, call `fetchDepictSearchResultSSR(...)` in a Remix loader — it builds a `DepictSearchClient` directly (no React hooks), runs the listing or search request, and returns a normalized `SearchResult`:
+
+```ts
+const initialSearchResult = await fetchDepictSearchResultSSR({
+  query,           // DepictSearchResultQuery
+  searchContext,   // { market, merchant, locale, session_id }
+  mappers,         // { product: mapDepictDisplayToProduct }
+});
+```
+
+Pass the result as `initialSearchResult` and set `mode="SSR"` so the provider hydrates instead of re-fetching on mount. Dedicated prefetches listing-page results this way in `client-frontends/dedicated/app/project/loaders/dedicated-loader.ts`, walking Storyblok content for `DepictSearchResultsProvider` bloks and fetching each one's `listing_id`.
+
+## 4. `DepictRecommendations` — standalone blocks
+
+A self-contained provider for recommendation strips. It does not use `CachedSearchResultsProvider` — it owns its own state via `SearchResultProvider`, fetches once per query hash, and explicitly **no-ops pagination, facets, and sort**. It hits `POST /recommend/products`.
+
+```tsx
+import { DepictRecommendations } from "@made-people/grease-depict";
+
+<DepictRecommendations payload={{ type: "after_basket" }}>
+  <SwipeableProductList ... />
+</DepictRecommendations>;
+```
+
+The `payload.type` selects the recommendation model and decides which product IDs are attached:
+
+| Group | Types | Product IDs come from |
+|---|---|---|
+| Cart-related | `after_basket`, `checkout` | Cart items (`useCartState`) |
+| Product-related | `related`, `cross_sell` | Current PDP (`useMaybeProductBase`) |
+| Standalone | `landing_page`, `recently_viewed`, `for_you` | None required |
+
+If a cart- or product-related type can't resolve any IDs, the hook logs an error and returns the empty result. An unknown `type` is rejected the same way.
+
+Dedicated uses it in three places: the mini-cart upsell (`DedicatedMiniCartUpsell.tsx`, switching between `after_basket` and `landing_page` on cart contents), the checkout page (`checkout-index-route.tsx`, `type: "checkout"`), and registered as a Storyblok component so editors can drop recommendation blocks into content.
+
+## 5. Autocomplete & suggestions
+
+`DepictAutoCompleteProvider` plugs a `DepictAutoCompleteClient` into the `AutoCompleteProvider` from `grease-search`:
+
+```tsx
+<DepictAutoCompleteProvider fetchSearchSuggestions onlyTopLevelCategories>
+  {children}
+</DepictAutoCompleteProvider>
+```
+
+| Prop | Effect |
+|---|---|
+| `fetchSearchSuggestions` | When `true`, also calls `GET /search/suggestions` and emits category + phrase suggestions |
+| `onlyTopLevelCategories` | When `true`, drops category suggestions that have ancestors |
+
+A single autocomplete search returns product suggestions (mapped through `mappers.product`), content-search link suggestions, category suggestions and phrase suggestions from `/search/suggestions`, plus recent searches from local storage (`getDepictRecentSearches`). The client swallows errors and returns an empty response on failure.
+
+## 6. The `DepictSearchClient` & V3 endpoints
+
+`DepictSearchClient` is the transport layer — a thin `axios` wrapper around `https://api.depict.ai/v3` with a 10s timeout. It merges `searchContext` (`market`, `merchant`, `locale`, plus `session_id` where applicable) into every request:
+
+| Method | V3 endpoint |
+|---|---|
+| `search(params)` | `POST /search/results` |
+| `getListing(params)` | `POST /listings/{listing_id}/products` |
+| `suggestions(params)` | `GET /search/suggestions` |
+| `getRecommendations(params)` | `POST /recommend/products` |
+
+Param types omit the context fields the client injects: `DepictSearchClientParams`, `DepictProductListingClientParams`, `DepictRecommendationClientParams`, `DepictSearchSuggestionsClientParams`. In React, get a memoized instance via `useDepictSearchClient()`.
+
+Responses are normalized to a Grease `SearchResult` by `depictSearchResultToGreaseSearchResult`, which delegates to:
+
+- `depictDisplaysToSearchItems` — runs each Depict display through `mappers.product`, drops the undefined ones
+- `depictFilterToSearchResultFacet` — maps `checkbox` and `checkbox-hierarchical` filters to facets (other filter types are dropped)
+- `depictSortToSearchResultSort` — maps Depict sort options, defaulting to `_relevance`
+
+## 7. Product mapper & DPC tracking
+
+The mapper is the other half of the adapter — same override pattern as the other vendors (see [Search Architecture](./search)). Dedicated supplies `mapDepictDisplayToProduct`, which validates the Depict display shape and copies Depict's tracking IDs onto the Grease product as attributes:
+
+| Attribute key | Used for |
+|---|---|
+| `depict_tracking_product_id` | Product identity for recommendation requests |
+| `depict_tracking_product_listing_result_id` | PLP click + add-to-cart tracking |
+| `depict_tracking_search_result_id` | Search result click tracking |
+| `depict_tracking_recommendation_id` | Recommendation click tracking |
+
+`getDepictCustomId(productBase, key)` reads these back off the product's `attributes`. `DepictNotifications` (mounted by `DepictProvider`) uses them to drive the Depict tracking client (`@depict-ai/dpc`, via `useDepictDpc`):
+
+- `productViewed` on a PDP → `dpc.setProductId(...)`
+- `productClicked` on a PLP → the matching click event (listing-result / search-result / recommendation)
+- `addToCart` → `dpc.sendAddToCartEvent(...)`
+- `orderPlaced` → `dpc.sendPurchaseEvent(...)`
+
+DPC is client-only — `useDepictDpc` returns `null` server-side — and it picks up `session_id` from the `searchContext` via `dpc.setSessionId(...)`.
+
+## Gotchas
+
+- **No `session_id`, degraded tracking.** `session_id` is allowed to be `undefined` (SSR has no Centra token). Search still works, but DPC events won't be stitched to a session until the token is present.
+- **Recommendations render nothing.** `DepictRecommendations` shows nothing until results resolve, and `useDepictFetchRecommendations` returns an empty result when a cart- or product-related type can't find any tracking IDs. Render skeletons/empty states outside the provider.
+- **Invalid recommendation type.** A `payload.type` outside the accepted set logs `Depict: Invalid recommendation type` and returns empty — typos fail silently in the UI.
+- **Missing tracking attributes.** If the mapper doesn't copy the `depict_tracking_*` attributes onto the product, `DepictNotifications` can't fire click events and cart/PDP recommendations lose their product IDs.
+- **Unsupported filter types.** `depictFilterToSearchResultFacet` only handles `checkbox` and `checkbox-hierarchical`; any other Depict filter type is dropped from the facet list.
+- **Forgot `mode="SSR"`.** If you prefetch with `fetchDepictSearchResultSSR` but leave `mode` unset (or `"CLIENT"`), the provider re-fetches on mount and the SSR payload is wasted.
+
+## Troubleshooting
+
+**Search returns nothing** — confirm `searchContext.merchant`, `market`, and `locale` are correct; they're injected into every V3 request. A wrong merchant returns an empty result set, not an error.
+
+**PLP/search renders empty but the network response has displays** — the product mapper returned `undefined` for every display. Check `mapDepictDisplayToProduct` against the actual display shape (it validates with a Zod guard).
+
+**Recommendations are blank on cart/checkout** — no `depict_tracking_product_id` on the cart items, so no product IDs to send. Verify the mapper copies that attribute and that the items came through Depict.
+
+**Tracking events not sent** — `useDepictDpc` returns `null` during SSR by design; events only fire client-side. Also confirm `DepictProvider` is mounted (it renders `DepictNotifications`).
+
+**Sort doesn't stick** — Depict resets pagination to page 1 on sort change. If a custom sort never matches, check that the sort id (`{field}|{order}`) lines up with what `depictSortToSearchResultSort` emits; the default is `_relevance`.
+
+## Related packages
+
+- `@made-people/grease-search` — required peer; hosts `SearchProvider`, `CachedSearchResultsProvider`, `AutoCompleteProvider`, and the `SearchResultMethods` contract
+- `@made-people/grease-product`, `@made-people/grease-cart`, `@made-people/grease-order` — event emitters `DepictNotifications` subscribes to, plus the cart/PDP hooks recommendations read
+- `@made-people/functions-crc32` — query hashing for `DepictRecommendations`
+
+## Related
+
+- [Search Architecture](./search) — the adapter contract, query-type union, and mapper pattern Depict implements
+- [Implementing Algolia](./algolia) — a sibling search adapter for comparison
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — where search providers sit in the stack
+
+**Next:** [Search Architecture](./search) · [Anatomy of a Gears Client](./anatomy-of-a-gears-client) · [Cart](./cart) · [Product](./product) · [Checkout](./checkout)

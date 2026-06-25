@@ -1,0 +1,266 @@
+---
+title: Newsletter & Back-in-Stock
+description: Wire up grease-newsletter and grease-back-in-stock — two sibling packages that share one driver-injection pattern
+---
+
+## What you'll learn
+
+How to mount `@made-people/grease-newsletter` and `@made-people/grease-back-in-stock` in a React client, hand each one a client driver, and call its method hook with built-in loading and error state. The two packages are near-identical in shape, so the shared pattern is explained once and then each package's specifics follow.
+
+## The four things to know
+
+1. **Both packages are backend-agnostic.** You hand the provider a client driver and grease provides the provider, hook, and event emitter. The host supplies the concrete driver (Voyado Engage, Emarsys, Centra, …).
+2. **Every call flows through a method hook.** `useNewsletterMethod` / `useBackInStockMethod` wrap a single driver method and return `{ execute, error, … }` plus a loading indicator.
+3. **The hook validates email before it calls the driver.** A bad email throws synchronously and sets `error` — the driver is never reached.
+4. **Success emits an event; errors don't.** On a resolved driver call the emitter fires the method name with `{ payload, additionalData }`. Failures only land in hook state.
+
+## 1. The shared pattern
+
+Both packages are built from the same five files, named per package:
+
+| Piece | Newsletter | Back-in-stock |
+|---|---|---|
+| Provider | `NewsletterProvider` | `BackInStockProvider` |
+| Context hook | `useNewsletter` | `useBackInStock` |
+| Method hook | `useNewsletterMethod` | `useBackInStockMethod` |
+| Driver type | `NewsletterClientDriver` | `BackInStockClientDriver` |
+| Event emitter | `newsletterEventEmitter` | `backInStockEventEmitter` |
+| Additional-data provider | `NewsletterEventAdditionalDataProvider` | `BackInStockEventAdditionalDataProvider` |
+
+The flow is the same in both:
+
+```
+Provider                         ← you pass a client driver (+ optional emitter)
+  └─ EventAdditionalDataProvider ← optional; injects additionalData on every event
+      └─ component
+          └─ useXMethod("…")     ← { execute, error, loading | loadingState }
+```
+
+The provider just stashes the driver and an event emitter on context. When you omit the emitter prop, a shared module-level singleton is used — the same instance other packages can subscribe to. `useNewsletter()` / `useBackInStock()` throw if called outside their provider.
+
+The method hook does the work. `execute(options)`:
+
+1. clears `error`,
+2. validates `options.email` via `toEmailAddressOrUndefined` from `@made-people/types-email-address` — on failure it sets a typed `Error` and throws before touching the driver,
+3. flips the loading indicator,
+4. awaits `driver[method](options)`,
+5. on success emits `method` with `{ payload: options, additionalData }`,
+6. on failure sets `error` (wrapping non-`Error` throws) and rethrows,
+7. always clears the loading indicator in `finally`.
+
+The `additionalData` comes from the matching `EventAdditionalDataProvider`; when none is mounted the hook reads `{ additionalData: undefined }`.
+
+> **Install:**
+>
+> ```bash
+> # Inside the monorepo
+> rush add -p @made-people/grease-newsletter
+> rush add -p @made-people/grease-back-in-stock
+>
+> # Outside the monorepo
+> pnpm add @made-people/grease-newsletter @made-people/grease-back-in-stock
+> ```
+>
+> The only declared peers are `react 18.2.0` and `react-dom 18.2.0`. The emitter (`@made-people/grease-event-emitter`) and email-address types sit in each package's `devDependencies` and arrive transitively — don't add them as client peers unless you consume them directly.
+
+## 2. Newsletter
+
+Mount the provider with a driver:
+
+```tsx
+import {
+  NewsletterProvider,
+  NewsletterProviderProps,
+} from "@made-people/grease-newsletter";
+
+const newsletterProviderProps: NewsletterProviderProps = {
+  newsletterClientDriver: new VoyadoEngageNewsletterClient(/* … */),
+};
+
+<NewsletterProvider {...newsletterProviderProps}>{children}</NewsletterProvider>;
+```
+
+`NewsletterProviderProps` takes `newsletterClientDriver` and an optional `newsletterEventEmitter`.
+
+### The driver contract
+
+`NewsletterClientDriver<T>` is a flat object of two async methods. `T` is the shape of the per-call `attributes`, so the driver can declare exactly what extra fields it accepts.
+
+```ts
+// src/frontend/grease/newsletter/src/newsletter-client-driver.ts
+export type NewsletterClientDriver<T = unknown> = {
+  subscribe(options: { email: string; attributes?: T }): Promise<void>;
+  unsubscribe(options: { email: string; attributes?: T }): Promise<void>;
+};
+```
+
+| Method | Purpose |
+|---|---|
+| `subscribe` | Subscribe an email (optionally with typed `attributes`) |
+| `unsubscribe` | Unsubscribe an email |
+
+`NewsletterSubscribeOptions<T>`, `NewsletterUnsubscribeOptions<T>`, and `NewsletterClientMethod` (`"subscribe" | "unsubscribe"`) are exported helpers.
+
+### useNewsletterMethod
+
+```tsx
+// client-frontends/dedicated/app/gears/routes/account/components/GenderPreferences.tsx
+const updateContact = useNewsletterMethod("subscribe");
+
+await updateContact.execute({
+  email: customer.email,
+  attributes: { genderPreference: next },
+});
+```
+
+`useNewsletterMethod(method)` returns `{ loading, error, setError, execute }`. `loading` is a plain `boolean`; `setError` lets the UI clear the error itself. The `execute` argument type is inferred from the chosen method's signature.
+
+### Events
+
+On a resolved call the hook emits the method name on `newsletterEventEmitter`:
+
+```ts
+newsletterEventEmitter.emit("subscribe", { payload: options, additionalData });
+```
+
+`NewsletterEvent` is keyed by method name; each event carries `{ payload, additionalData? }`. Wrap components in `NewsletterEventAdditionalDataProvider` to attach `additionalData` to every emitted event.
+
+## 3. Back-in-stock
+
+Same shape, one method:
+
+```tsx
+import {
+  BackInStockProvider,
+  BackInStockProviderProps,
+} from "@made-people/grease-back-in-stock";
+
+const backInStockProviderProps: BackInStockProviderProps = {
+  backInStockClientDriver: new VoyadoEngageBackInStockClient(/* … */),
+};
+
+<BackInStockProvider {...backInStockProviderProps}>{children}</BackInStockProvider>;
+```
+
+`BackInStockProviderProps` takes `backInStockClientDriver` and an optional `backInStockEventEmitter`.
+
+### The driver contract
+
+`BackInStockClientDriver` has a single `subscribe` method. Unlike newsletter it requires a `subscribeItemId` — the variant the shopper wants restock notice for.
+
+```ts
+// src/frontend/grease/back-in-stock/src/back-in-stock-client-driver.ts
+export type BackInStockSubscribeOptions = {
+  email: string;
+  subscribeItemId: string;
+  attributes?: BackInStockMethodAttributes;
+};
+```
+
+| Method | Purpose |
+|---|---|
+| `subscribe` | Register an email for restock notice on `subscribeItemId` |
+
+`BackInStockMethodAttributes` is `Record<string, unknown>`; `BackInStockClientMethod` is `"subscribe"`.
+
+### useBackInStockMethod
+
+```tsx
+const { loadingState, error, execute } = useBackInStockMethod("subscribe");
+
+await execute({ email, subscribeItemId });
+```
+
+The one difference from newsletter: this hook reports a **`loadingState` union** — `"default" | "loading" | "complete"` — rather than a boolean. It moves to `"loading"`, then `"complete"` on success, and back to `"default"` in `finally`; on error it goes straight to `"default"`. There is no `setError` here.
+
+### Events
+
+Identical mechanism to newsletter: `backInStockEventEmitter.emit("subscribe", { payload, additionalData })` on success, with `additionalData` sourced from `BackInStockEventAdditionalDataProvider`.
+
+## 4. Implementing a client driver
+
+A driver is a plain class implementing the driver type. Miss Mary's Emarsys newsletter driver shows the pattern — note the typed `attributes` generic and that an unsupported method just throws:
+
+```ts
+// client-frontends/miss-mary/app/services/emarsys/mm-emarsys-newsletter-client.ts
+export class MmEmarsysNewsletterClient
+  implements NewsletterClientDriver<MmEmarsysNewsletterOptions>
+{
+  async subscribe(
+    options: NewsletterSubscribeOptions<MmEmarsysNewsletterOptions>,
+  ): Promise<void> {
+    const { email, attributes } = options;
+    // validate attributes, then call the backend
+    await this.client.put("/emarsys/subscribe", { email, /* … */ });
+  }
+
+  async unsubscribe(): Promise<void> {
+    throw new Error("Unsubscribe method not implemented");
+  }
+}
+```
+
+The driver owns all backend specifics — auth, market/locale, opt-in method, tracking. grease never inspects the payload beyond the email check in the hook.
+
+## 5. Wiring in a client
+
+Drivers are constructed in the bootstrap and passed as provider props. Stronger and Dedicated nest both providers and feed each a Voyado Engage driver:
+
+```tsx
+// client-frontends/stronger/app/project/bootstrap.tsx (trimmed)
+const newsletterProviderProps: NewsletterProviderProps = {
+  newsletterClientDriver: new VoyadoEngageNewsletterClient(voyadoEngageClient, {
+    market: frontendContext.marketName ?? "SE",
+    contactType: "member",
+    withTracking: true,
+    /* … */
+  }),
+};
+
+const backInStockProviderProps: BackInStockProviderProps = {
+  backInStockClientDriver: new VoyadoEngageBackInStockClient(voyadoEngageClient, {
+    acceptemail: true,
+    store: "stronger.centra",
+    /* … */
+  }),
+};
+
+<NewsletterProvider {...newsletterProviderProps}>
+  <BackInStockProvider {...backInStockProviderProps}>
+    {children}
+  </BackInStockProvider>
+</NewsletterProvider>;
+```
+
+The `VoyadoEngage…Client` drivers come from `@made-people/grease-voyado-engage`. Whitepouches instead uses `CentraNewsletterClient` for newsletter — same provider prop, different driver. Nesting order between the two providers doesn't matter; each owns an independent context.
+
+## Gotchas
+
+- **`useNewsletter()` / `useBackInStock()` outside the provider throw.** Mount the provider above every component that calls the hook.
+- **The two loading shapes differ.** Newsletter's hook returns a boolean `loading`; back-in-stock returns a `"default" | "loading" | "complete"` `loadingState`. Don't copy a `progress={loading ? …}` line between them without adjusting.
+- **Bad email never reaches the driver.** `execute` throws `Newsletter_Method_InvalidEmail` / `Back_In_Stock_Method_Invalid_Email` before calling the driver and sets `error`. Catch the rejection or it surfaces as an unhandled error.
+- **Errors don't emit.** Only resolved calls fire the emitter. Analytics that subscribe to the emitter will never see failed subscribes.
+- **`additionalData` needs its provider.** Without `…EventAdditionalDataProvider` mounted above the hook, every event's `additionalData` is `undefined` — no error, just empty.
+- **`unsubscribe` may be a stub.** It's on the newsletter interface, but a given driver (e.g. the Emarsys one) can throw `"…not implemented"`. Check the concrete driver before wiring an unsubscribe UI.
+- **Omitting the emitter prop shares a singleton.** Fine for one provider per app; if you mount the same package twice they'll share the default emitter unless you pass distinct instances.
+
+## Troubleshooting
+
+**`useNewsletter must be used within a NewsletterProvider`** (or the back-in-stock equivalent) — a component calling the hook is rendered outside the provider. Move the provider higher in the tree.
+
+**`execute` rejects immediately with an `InvalidEmail` error** — the email failed `toEmailAddressOrUndefined`. The driver was never called; fix the input, not the driver.
+
+**Subscribe succeeds but analytics see nothing** — either the call rejected (errors don't emit) or nothing is subscribed to the emitter. Confirm the same emitter instance is shared, and that you didn't pass a custom emitter to the provider that your listener isn't watching.
+
+**Loading spinner never resets** — you're reading the wrong field. Use `loading` (boolean) for newsletter, `loadingState` (union) for back-in-stock.
+
+**Looking for an import and it's not in `src/index.ts`?** The barrel is generated by barrelsby at build. Import from the package entry and trust the build.
+
+## Related
+
+- [Voyado Elevate](./voyado-elevate) — sibling integration package
+- [Account & Orders](./account) — `GenderPreferences` calls `useNewsletterMethod`
+- [Product](./product) — back-in-stock subscribes per product item id
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — the driver-injection model these packages follow
+
+**Next:** [Account & Orders](./account) · [Product](./product) · [Anatomy of a Gears Client](./anatomy-of-a-gears-client)

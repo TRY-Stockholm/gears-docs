@@ -100,7 +100,7 @@ LOCAL_SERVICES=bff
 GEARS_DOMAIN=frackend.net
 ```
 
-Values are comma- or space-separated. Optionally pin a port: `LOCAL_SERVICES=bff, engage:8087`. Listed services are rewritten to `https://<tenant>.<service>.local.<GEARS_DOMAIN>:8080`. The Dedicated client's `.env` has the local-BFF block commented out as a ready-to-uncomment recipe.
+Values are comma- or space-separated. Optionally pin a port: `LOCAL_SERVICES=bff, engage:8087`. Listed services are rewritten to `https://<tenant>.<service>.local.<GEARS_DOMAIN>:8080`. `LOCAL_SERVICES` isn't in the checked-in `env-dist` files — add it to your own `.env` when you want the override.
 
 ### When you change `.env`
 

@@ -94,7 +94,7 @@ One controller, many GETs, all served from MongoDB-cached Storyblok datasources.
 
 ## Admin endpoints (`/v1/admin`)
 
-Admin routes are authenticated with `ApiKeyAuthMiddleware`. Set `x-admin-api-key` to the value of `admin.apiKey` in tenant config.
+Admin routes are authenticated with `ApiKeyAuthMiddleware`. It matches the `x-admin-key` request header against the service's `ADMIN_API_KEY` environment variable (not a config value) — set `x-admin-key` to whatever `ADMIN_API_KEY` is on the deploy you're hitting.
 
 ### Cache collector
 
@@ -132,7 +132,7 @@ All behavior is driven by a Zod-validated config document loaded by `configDrive
 - `storyblok` — which field holds the breadcrumb label
 - `imgProxy.url` — required
 - `frontend.fallbackBaseUrl`, `frontend.alwaysUseFallbackBaseUrl`, `frontend.headers.cacheControl`, `frontend.seo.*`
-- `admin.apiKey` — authenticates admin routes
+- `admin.apiKey` — present in the schema, but admin-route auth itself checks the `ADMIN_API_KEY` env var (see Environment), not this field
 - `catalog.product.{uriField, mediaKey, associatedStoryblokStories, productSearchOptions}`
 - `site.{defaultLanguageCode, globalStoryblokStories, redirectDomainList, redirectTldToSiteSlug, siteSlugRedirects}` — **deprecated** in favor of `sites` (multi-site)
 - `sites` — per-site context (`siteSlug` → `frontendContext`)
@@ -149,7 +149,7 @@ The config document is tenant-aware. Each tenant has its own.
 The BFF reads very few env vars directly — most settings come from the config driver. What you'll see in `env-dist`:
 
 ```bash
-ADMIN_API_KEY=x                     # fallback admin key when config is missing
+ADMIN_API_KEY=x                     # admin key for /v1/admin/* (matched against the x-admin-key header)
 PORT=8082                           # server port (defaults to 8080)
 MONGOOSE_CONFIG_DRIVER_ENABLED=1    # use Mongo config driver
 ```
@@ -241,7 +241,7 @@ Then point a client at it by adding `LOCAL_SERVICES=bff` to the client's `.env` 
 
 - **Blank page, root loader returns `null`.** The BFF did not return a `settingsAndContentResponse` for this host/siteSlug. Check the BFF logs, confirm the site exists in the `sites` config, and verify `x-tenant-id` is set.
 - **`"Centra checkout API base URL is missing"` 503.** `modules.centra.apiClients.checkoutApi.baseUrl` is unset in config. Fix the tenant's config document.
-- **401 from `/v1/admin/*`.** Missing or wrong `x-admin-api-key`. Must match `admin.apiKey` in config (env `ADMIN_API_KEY` is a fallback, not the normal path).
+- **401 from `/v1/admin/*`.** Missing or wrong `x-admin-key` header. It must equal the service's `ADMIN_API_KEY` env var — the middleware reads the env var, not the `admin.apiKey` config field.
 - **Stale data after a Centra import.** Hit the right collector (`PUT /v1/admin/cache-collector/centra/products`) — the SWR background revalidation only runs when a request actually arrives.
 - **Local BFF unreachable from client.** `LOCAL_SERVICES=bff` is only honored when `GEARS_RUN_MODE=local`. Cluster mode bypasses the override.
 - **ncc-compiled stack traces.** When a 500 happens in production, line numbers point into the single compiled `dist/index.js`. Source maps help but aren't always available — add `logger.error(..., { error })` generously.

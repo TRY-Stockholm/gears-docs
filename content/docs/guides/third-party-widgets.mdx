@@ -1,0 +1,226 @@
+---
+title: Third-Party Widgets
+description: Mount the EcomID size-finder/nudge and the AgeChecker.net age-gate — two external vendor widgets that share a provider + script-loader + component shape
+---
+
+## What you'll learn
+
+How to wire up two external vendor widgets — `@made-people/grease-ecomid` (EcomID size finder and nudge, used on TRY Stockholm clients) and `@made-people/grease-age-checker` (the agechecker.net popup) — both of which follow the same shape: a config provider near the app root, a script that loads the vendor bundle, and components that mount the actual widget into a DOM node.
+
+## The shape both packages share
+
+1. **A provider carries config.** `EcomIdProvider` holds `clientId`, `locale`, and a `fetchToken` function; `AgeCheckerProvider` holds `apiKey` and an `ageCheckerEnabled` flag. Their hooks (`useEcomIdConfig`, `useAgeChecker`) throw if called outside the provider.
+2. **A script tag loads the vendor bundle.** EcomID has a dedicated `EcomIDScript` component; AgeChecker injects its script from inside the `AgeChecker` component itself once it has config.
+3. **Components mount the widget into a `<div>` (or trigger element).** They poll for the vendor global, then call the vendor's `init` against a DOM id. Nothing renders server-side — these are client-only widgets.
+
+## 1. Prerequisites
+
+- A React client that can import `@made-people/grease-ecomid` and/or `@made-people/grease-age-checker`.
+- An EcomID `clientId` and a BFF endpoint that mints session tokens (for EcomID).
+- An agechecker.net API key (for AgeChecker).
+
+Install:
+
+```bash
+# Inside the monorepo
+rush add -p @made-people/grease-ecomid
+rush add -p @made-people/grease-age-checker
+
+# Outside the monorepo
+pnpm add @made-people/grease-ecomid
+pnpm add @made-people/grease-age-checker
+```
+
+## 2. EcomID
+
+### Mount the provider
+
+`EcomIdProvider` takes a single `config` object — `clientId`, `locale`, and an optional `fetchToken`. Dedicated wraps it in a bootstrap component (`client-frontends/dedicated/app/project/bootstrap/ecomid/ecomid-bootstrap.tsx`); Stronger builds the config inline in `client-frontends/stronger/app/project/bootstrap.tsx`.
+
+```tsx
+import { EcomIdProvider, type EcomIdConfig } from "@made-people/grease-ecomid";
+
+const fetchEcomIdToken = async (customerId: string): Promise<string> => {
+  const response = await bffClient.request<{ token?: string }>(
+    "v1/ecomid/sessions",
+    new Headers(),
+    "post",
+    { ref_id: customerId },
+  );
+  if (!response?.token) {
+    throw new Error("Failed to fetch EcomID session token");
+  }
+  return response.token;
+};
+
+const ecomIdConfig: EcomIdConfig = {
+  clientId: ECOMID_CLIENT_ID,
+  locale: getLocale(frontendContext), // e.g. "sv-se", "en-us"
+  fetchToken: fetchEcomIdToken,
+};
+
+<EcomIdProvider config={ecomIdConfig}>{children}</EcomIdProvider>;
+```
+
+`fetchToken` keeps HTTP concerns out of the package — the client owns the BFF call. It's only used for the *personalized* nudge; the size finder and general nudge don't need it.
+
+| Config field | Type | Notes |
+|---|---|---|
+| `clientId` | `string` | Your EcomID client id, hard-coded per client (`config/ecomid.ts`) |
+| `locale` | `string` | `lang-market`, e.g. `sv-se`. Stronger/Dedicated derive it with `getLocale(frontendContext)` |
+| `fetchToken` | `(customerId: string) => Promise<string>` | Optional. Mints a session token via the BFF; only needed for a personalized nudge |
+
+### Load the script
+
+`EcomIDScript` injects `https://modules.ecomid.com/loaders/v1/loader.js` (a `type="module"` script) into `<head>` once. It guards against double-injection by checking `window.ecomid` and an existing `script[src=...]`, and renders `null`. Both Stronger and Dedicated mount it in `app/root.tsx`:
+
+```tsx
+import { EcomIDScript } from "@made-people/grease-ecomid";
+
+<EcomIDScript />;
+```
+
+### Size finder
+
+`EcomIDSizeFinder` renders a `<div>` and, via `useEcomIdSizeFinder`, polls for `window.ecomid` then calls `ecomid.widgets.sizeFinder.init("#<id>", props)`. It's mounted on the product page. The `callbacks` are where you wire it into Gears state — Stronger uses `onRecommendation` and `onAddToCart` to select the matching size option and quick-add to cart (`client-frontends/stronger/app/project/components/eComID/EcomIdSizeFinder.tsx`).
+
+```tsx
+import { EcomIDSizeFinder } from "@made-people/grease-ecomid";
+
+<EcomIDSizeFinder
+  sku={product.sku}
+  styles={{ overlay: { root: "body" } }}
+  callbacks={{
+    onRecommendation: (productId, size) => {
+      /* select the size option */
+    },
+    onAddToCart: (productId, size) => {
+      /* quick add to cart */
+    },
+  }}
+/>;
+```
+
+| Prop | Type | Notes |
+|---|---|---|
+| `sku` | `string` | Required. Passed to the widget as `opts.productId` |
+| `callbacks` | `EcomIDCallbacks` | `onOpen`, `onClose`, `onRecommendation`, `onAddToCart`, `onRender`, `onError` |
+| `overrides` | `EcomIDSizeFinderOverrides` | Widget text / icon overrides |
+| `styles` | `EcomIDSizeFinderStyles` | Brand colors, overlay `zIndex`/`root` |
+| `id` | `string` | DOM id, defaults to `ecomid-size-finder` |
+| `token` | `string` | Optional session token override |
+
+### Nudge
+
+`EcomIDNudge` renders a `<div>` and, via `useEcomIdNudge`, calls `ecomid.widgets.info.init(...)`. Pass a `customerId` to get the personalized variant — the hook then calls the provider's `fetchToken` and passes the resulting token to the widget. With no `customerId` (or if the token fetch fails) it falls back to the general, token-less nudge. Dedicated mounts it on the product page (`client-frontends/dedicated/app/gears/routes/centra-product-page-route.tsx`):
+
+```tsx
+import { EcomIDNudge } from "@made-people/grease-ecomid";
+
+// General nudge — no token needed
+<EcomIDNudge id="ecomid-nudge-pdp" styles={{ overlay: { root: "body" } }} />
+
+// Personalized — fetches a token via the provider's fetchToken
+<EcomIDNudge customerId={customer.id} nudgeOpts={{ showReturnFeeCard: true }} />
+```
+
+| Prop | Type | Notes |
+|---|---|---|
+| `customerId` | `string` | Optional. Presence switches on the personalized variant + token fetch |
+| `nudgeOpts` | `EcomIDNudgeOpts` | `name`, `showReturnFeeCard`, `dynamicReturnFeeActive`, `returnFeeFaqLink` |
+| `styles` | `EcomIDNudgeStyles` | Typography, spacing, overlay, CTA styling |
+| `id` | `string` | DOM id, defaults to `ecomid-nudge` |
+
+If you need to drive the widgets from custom markup, `useEcomIdSizeFinder` and `useEcomIdNudge` return a `ref` you attach to your own element.
+
+## 3. AgeChecker
+
+### Mount the provider
+
+`AgeCheckerProvider` carries two fields — `apiKey` and `ageCheckerEnabled`. Whitepouches builds them in `client-frontends/whitepouches/app/project/bootstrap.tsx`, sourcing the enable flag from loader data:
+
+```tsx
+import {
+  AgeCheckerProvider,
+  type AgeCheckerProviderProps,
+} from "@made-people/grease-age-checker";
+
+const ageCheckerProviderProps: AgeCheckerProviderProps = {
+  apiKey: "your-agechecker-api-key",
+  ageCheckerEnabled: ageCheckerData?.ageCheckerEnabled ?? false,
+};
+
+<AgeCheckerProvider {...ageCheckerProviderProps}>
+  {children}
+</AgeCheckerProvider>;
+```
+
+| Config field | Type | Notes |
+|---|---|---|
+| `apiKey` | `string` | agechecker.net API key |
+| `ageCheckerEnabled` | `boolean` | Master switch. When `false`, the gate auto-passes (see below) |
+
+### The component, the script, and the trigger
+
+`AgeChecker` renders `null`. On mount it reads `apiKey` / `ageCheckerEnabled` from the provider, sets `window.AgeCheckerConfig`, and injects `https://cdn.agechecker.net/static/popup/v1/popup.js` into `<head>` (crossorigin, once). The popup binds to the element whose id you pass as `elementId` — so you render your own trigger button with that id alongside it:
+
+```tsx
+import { AgeChecker } from "@made-people/grease-age-checker";
+
+<AgeChecker
+  elementId="age-checker-checkout"
+  onVerifyAgeCompleted={onSuccess}
+  onVerifyAgeError={() => toast({ description: "Verify age error", type: "error" })}
+  onPreSubmit={(data) => console.log(data)}
+/>
+<button id="age-checker-checkout">Verify age</button>
+```
+
+Whitepouches mounts it as a checkout payment gate (`client-frontends/whitepouches/app/project/components/age-checker/age-checker-checkout.tsx`) and again on the register page (`.../routes/account/register-page-route.tsx`).
+
+### The popup callbacks
+
+The component maps its props onto the vendor's `AgeCheckerConfig`:
+
+| Prop | Vendor hook | Fires when |
+|---|---|---|
+| `onVerifyAgeCompleted` | `onclosed` | The popup closes (treated as completion) |
+| `onVerifyAgeError` | `onError` | The vendor reports a verification error |
+| `onPreSubmit` | `onpresubmit` | Before submit — receives `AgeCheckerData`; the component then calls the vendor's `continueFn` for you |
+
+`onPreSubmit` gives you the customer's entered details (`AgeCheckerData.customer` — name, address, date-of-birth parts) before the vendor submits; the register page stashes this to prefill the account form.
+
+### The enable flag short-circuit
+
+When `ageCheckerEnabled` is `false`, `AgeChecker` calls `onVerifyAgeCompleted` immediately and loads nothing — the gate passes through with no popup. This is how markets that don't require age verification skip the widget entirely.
+
+## Gotchas
+
+- **Hooks throw outside their provider.** `useEcomIdConfig` and `useAgeChecker` both throw if no provider is mounted above them. Put the provider near the app root.
+- **EcomID widgets poll, then give up.** `useEcomIdSizeFinder` / `useEcomIdNudge` poll for `window.ecomid` every 100ms and stop after 10s. If `EcomIDScript` isn't mounted (or the loader is blocked), the widget silently never initializes.
+- **Size finder needs a `sku`.** `useEcomIdSizeFinder` returns early with no `sku`, and `EcomIDSizeFinder` is typically guarded behind a "has variants" check before it's rendered.
+- **Personalized nudge depends on `fetchToken`.** Pass a `customerId` but no `fetchToken` on the provider and the hook can't mint a token — it falls back to the general nudge. A failed token fetch does the same (and calls `onTokenError` if you supplied one).
+- **AgeChecker binds to an external `elementId`.** The popup attaches to the element with that id, which you render yourself — `AgeChecker` does not render the trigger button. Mismatched ids mean nothing happens on click.
+- **`onVerifyAgeCompleted` is the close event, not a pass/fail.** It maps to the vendor's `onclosed`, and it also fires immediately when `ageCheckerEnabled` is `false`.
+- **Script load failure redirects.** If the agechecker.net script fails to load, `AgeChecker` sends the browser to `https://agechecker.net/loaderror`.
+
+## Troubleshooting
+
+**EcomID widget never appears** — `EcomIDScript` isn't mounted, or `window.ecomid` never resolved within 10s. Confirm `<EcomIDScript />` is in `root.tsx` and the loader URL isn't blocked (consent/adblock). The `<div>` still renders; it's just never initialized.
+
+**Size finder renders nothing** — missing `sku`, or the component is gated behind a variant check that returned `null`. Confirm the product actually has variants.
+
+**Nudge shows the general variant when you expected personalized** — either no `customerId`, no `fetchToken` on the provider, or the token fetch failed. Check `onTokenError` and the BFF `v1/ecomid/sessions` response.
+
+**Age popup doesn't open on click** — the button id doesn't match `elementId`, or `ageCheckerEnabled` is `false` (the gate auto-passes). Verify the provider's flag and that the trigger element id matches.
+
+**Age gate always passes without a popup** — `ageCheckerEnabled` is `false`. That's the intended short-circuit; flip the flag in the source feeding the provider.
+
+## Related
+
+- [Implementing Product](./product) — where the EcomID size finder and nudge are mounted on the PDP
+- [Checkout](./checkout) — the AgeChecker payment gate
+- [Anatomy of a Gears Client](./anatomy-of-a-gears-client) — where providers and scripts sit in the bootstrap
+- [Grease Image](./image) — another package configured once at the app root
+
+**Next:** [Product](./product) · [Checkout](./checkout) · [Getting Started](./getting-started)

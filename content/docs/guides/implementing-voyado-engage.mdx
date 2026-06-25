@@ -12,7 +12,7 @@ How to mount `@made-people/grease-voyado-engage` so a client can identify contac
 1. **One provider does it all.** `VoyadoEngageProvider` holds the API client, discovery key, frontend context, and tracking toggle. Everything else reads from it.
 2. **It goes inside Centra.** The provider needs a `cartReference` from Centra's token handler, so it must sit below `CentraBootstrap` in the stack.
 3. **Drivers plug into sibling greases.** `VoyadoEngageNewsletterClient`, `VoyadoEngageBackInStockClient`, and `VoyadoEngageCentraAccountDriver` are the adapters that hand Voyado to `grease-newsletter`, `grease-back-in-stock`, and `grease-account`.
-4. **Tracking depends on `window.va`.** The Voyado tracking script must be loaded separately. If `window.va` is missing, a call waits 1 second then attempts once; if `window.va` is still undefined, it logs a `console.warn` and drops the event.
+4. **Tracking depends on `window.va`.** The Voyado tracking script must be loaded separately. If `window.va` is missing, a call polls for it every 500ms for up to 20 attempts (~10s); if it's still undefined, it logs a `console.warn` and drops the event.
 
 ## Install
 
@@ -124,7 +124,7 @@ const {
 } = useVoyadoEngageContactPromotions();
 ```
 
-Auto-fetches ECOM-redeemable promotions for the logged-in contact. `voucherCode` is what the user enters; `promotionId` is Voyado's internal id. Both are required to apply.
+Auto-fetches ECOM-redeemable promotions for the logged-in contact. `voucherCode` is what the user enters and is the only required argument when applying; `promotionId` (Voyado's internal id) is optional and only kept for tracking.
 
 ## 5. Tracking
 

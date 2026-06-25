@@ -71,7 +71,7 @@ Implement `CartClientDriver` — a flat object of async methods returning `Cart`
 | `fetchCart` | Load the current cart |
 | `addToCart` | Add a product line — `CartAddToCartOptions` requires `{ itemId, product: ProductBase, quantity?, comment? }`. The required `product` is why composed hooks need `grease-product` in context. |
 | `addBundleToCart` | Add a bundle with sections |
-| `removeFromCart` | Remove a line — `CartRemoveFromCartOptions` requires `{ lineId, removedItem: LineItem }`. Pass the full line you're removing, not just the id. |
+| `removeFromCart` | Remove a line — `CartRemoveFromCartOptions` requires `{ lineId, quantity, removedItem: LineItem }`. Pass the full line you're removing, not just the id. |
 | `updateQuantity` | Change a line quantity |
 | `updateComment` | Set a line comment |
 | `addVoucher` | Apply a voucher code |
@@ -112,10 +112,10 @@ const { cart, loading, error } = useCartState();
 const updateQuantity = useCartMethod("updateQuantity");
 const removeFromCart = useCartMethod("removeFromCart");
 updateQuantity.execute({ lineId: data.lineId, quantity: data.quantity + 1 });
-removeFromCart.execute({ lineId: data.lineId, removedItem: data });
+removeFromCart.execute({ lineId: data.lineId, quantity: 1, removedItem: data });
 ```
 
-`removeFromCart` requires the full `removedItem: LineItem` alongside `lineId` — pass the line object you already have in scope rather than rebuilding it.
+`removeFromCart` requires `quantity` and the full `removedItem: LineItem` alongside `lineId` — pass the line object you already have in scope rather than rebuilding it.
 
 For PDP flows use the composed hooks:
 

@@ -5,7 +5,7 @@ description: Wire up grease-checkout for address forms, shipping, payment, and o
 
 ## What you'll learn
 
-How `@made-people/grease-checkout` (version `0.8.2`) plugs into a client frontend — which pieces it owns, which pieces `grease-centra` owns, and where your slot components land.
+How `@made-people/grease-checkout` plugs into a client frontend — which pieces it owns, which pieces `grease-centra` owns, and where your slot components land.
 
 ## The four things to know
 
@@ -79,7 +79,7 @@ Cart (CentraReviveCart hydrates selection)
 | Zero-total | `grease-checkout` contract | `FreeOrderComponent` |
 | Finalize | `grease-centra` | `GenericOrderReceipt`, `SelectionNotFound` |
 
-`CentraCheckoutUiConfigComponents` also exposes additional slots you can override: `StandalonePaymentWrapper`, `CartIsEmpty`, `CheckoutLoading`, `PaymentLoading`, `UnsupportedCheckoutFlow`, `UnsupportedPaymentMethod`, `UnsupportedShippingMethod`, `PaymentMethodFailed`, `CentraShippingMethodsRenderer`, and `CheckoutPaymentGate`. Defaults are provided, so only override the ones you need to brand.
+`CentraCheckoutUiConfigComponents` also exposes additional slots you can override: `StandalonePaymentWrapper`, `CartIsEmpty`, `CheckoutLoading`, `PaymentLoading`, `UnsupportedCheckoutFlow`, `UnsupportedPaymentMethod`, `UnsupportedShippingMethod`, `PaymentMethodFailed`, `CentraShippingMethodsRenderer`, `CheckoutPaymentGate`, and `YourCartHasBeenModified`. Defaults are provided, so only override the ones you need to brand.
 
 ## 4. Events on `checkoutEventEmitter`
 

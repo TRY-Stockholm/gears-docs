@@ -11,7 +11,7 @@ How to stand up a Remix app on top of Gears in about half an hour. By the end yo
 
 | Requirement | Notes |
 |---|---|
-| Node.js 20 or later | Anything 18+ will probably work; 20 is what the clients ship on |
+| Node.js 22 (pinned `22.13.1`) | The monorepo pins `22.13.1` in `.nvmrc` / `rush.json` — run `nvm use` |
 | pnpm 9+ | Any modern package manager works, we use pnpm |
 | A Centra tenant reachable through a Gears BFF | Either your own (`TENANT_ID`) or the shared dev credentials from your TRY contact |
 | A known-good product slug | Something like `/en/t-shirts/black-tee` — whatever the BFF returns a `centraProductPage` for |

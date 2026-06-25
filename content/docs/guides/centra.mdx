@@ -16,7 +16,7 @@ How to mount `@made-people/grease-centra` so Centra drives cart, product search,
 
 ## Prerequisites
 
-- A React client frontend that can import `@made-people/grease-centra` (v0.38.6).
+- A React client frontend that can import `@made-people/grease-centra`.
 - A Centra Checkout API base URL from your BFF, e.g. `settingsAndContentResponse.centraCheckoutApiBaseUrl`.
 - A `FrontendContextV1` that supplies the `CentraQueryContext` fields (`market`, `pricelist`, `language`, optional `site`) plus the mapper-options context (`currency`, `country`, `baseUrl`, `siteSlug`).
 
@@ -42,6 +42,7 @@ Every peer in `peerDependencies` must be installed at the required range — mis
 | `@made-people/grease-order` | ~0.10.11 |
 | `@made-people/managed-props` | ~1.8.1 |
 | `@made-people/react-prop-guard` | ~1.6.1 |
+| `@made-people/typeguards-common` | ~1.1.1 |
 | `react` / `react-dom` | 18.2.0 |
 | `zod` | ^3.22.4 |
 
