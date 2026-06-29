@@ -1,0 +1,153 @@
+---
+title: Configuring Elevate Facets
+description: How to add a new filter (facet) to an Elevate-backed client end to end — map the attribute into the product feed, re-index, declare the facet in Elevate, and let the frontend render it.
+---
+
+## What you'll learn
+
+How to make a product attribute filterable on an Elevate-backed client (e.g. **Stronger**, **Dedicated**) — from the raw Centra attribute all the way to a working filter in the product list. Adding a facet spans three places, and getting any one wrong makes the filter silently do nothing:
+
+1. **The feed** — the `voyado-elevate` service must send the attribute to Elevate (this is code/config we own).
+2. **Elevate** — the attribute must be declared as a facet in the **Facet configurator** (done in the Elevate Experience app, not in our repo).
+3. **The frontend** — renders supported facet types automatically.
+
+The golden rule: **a facet can only filter on data that's actually indexed for it.** Most "the filter doesn't work" issues are really "the attribute isn't in the feed, or has no values for this market."
+
+## The mental model
+
+```
+Centra product data
+   │  voyado-elevate feed service  (mapping config → JSONPath/literal)
+   ▼
+Elevate index  (product + variant custom_attributes)
+   │  Facet configurator  (declare attribute as a facet, pick Display type)
+   ▼
+Storefront API response  (facets[])  → grease-voyado-elevate → blueprint-filter
+```
+
+| Layer | Who controls it | What it decides |
+|---|---|---|
+| Feed `mapping` | Us (`voyado-elevate` tenant config) | **Which attributes exist** on the indexed product |
+| Facet configurator | Elevate admin (Experience app) | **Which attributes are facets**, their Display type, label, sort |
+| Frontend | Automatic | How a facet *renders* (checkbox list / range / toggle) |
+
+## 1. Map the attribute into the feed
+
+The `voyado-elevate` service builds the product feed from Centra and pushes it to Elevate. Which attributes ship is driven entirely by the **`mapping`** block in the tenant config — no pipeline code change is needed, the value mapper just iterates whatever keys you add.
+
+Add your attribute under one of these directives:
+
+| Directive | Sourced from | Use for |
+|---|---|---|
+| `mapping.product.custom_attributes` | Centra **product** level | Product-level attributes (brand, material, department) |
+| `mapping.variant.product_custom_attributes` | Centra **product** level, attached to each variant | Product attribute you want available at variant granularity |
+| `mapping.variant.item_custom_attributes` | Centra **item** level | True variant/size-level attributes (EAN, size) |
+
+Each value is either a **literal key** (a top-level field on the Centra object) or a **JSONPath expression** (for nested objects and arrays):
+
+```jsonc
+"mapping": {
+  "product": {
+    "custom_attributes": {
+      "brand": "brandName",                       // literal key
+      "material": "custom_material",
+      "category_ids": "$.categories[*].category", // JSONPath: field from each array item
+      "activity": "$.activty[*].descr"            // pick a sub-field out of each object
+    }
+  }
+}
+```
+
+### Objects and arrays are the tricky part
+
+Centra sends attributes **as-is** — the feed does not reshape them. A Centra attribute like `productFeatures` shaped `{ descr: "Quick-dry", image: "..." }` cannot be flattened to a plain string at the feed level. Two ways to handle it:
+
+- **Pick a scalar sub-field with JSONPath** so Elevate gets a filterable value, not an object:
+
+  ```jsonc
+  // whole array (objects) — usually NOT what you want for a filter
+  "productFeaturesVariant": "$.productFeaturesVariant[*]"
+
+  // a single field from each object — filterable
+  "productFeaturesVariant": "$.productFeaturesVariant[*].descr"
+  ```
+
+- **Or transform it in the frontend** before presenting, if you only need the reshape for display.
+
+A raw object that reaches Elevate tends to get coerced to a string and won't behave as a clean facet — always extract the scalar you actually want to filter on.
+
+### Product vs. variant level
+
+If the attribute lives on the **variant** in Centra, map it under `mapping.variant.*`. In practice Centra flattens products so product and variant collapse onto the same level, so a product-level mapping usually works too — but if a value is genuinely per-variant, use the variant directives and the matching JSONPath (e.g. `"$.productFeaturesVariant[*].descr"`).
+
+> Config shape reference: `src/services/nestjs/voyado-elevate/src/lib/config-schema.ts` (`mapping.product.custom_attributes`, `mapping.variant.product_custom_attributes`, `mapping.variant.item_custom_attributes`).
+
+## 2. Re-index the feed
+
+Mapping changes only reach Elevate after a feed run. Trigger one against the `voyado-elevate` service:
+
+```
+POST /admin/feed/products/all?force=true
+  headers:
+    x-tenant-id: <tenant>      # e.g. stronger
+    x-admin-key: <admin key>
+```
+
+- **`force=true`** re-imports every product even if unchanged — use it after a mapping change so the new attribute is guaranteed to land. Without it the run may skip unchanged products.
+- Admin-gated (`ApiKeyAdminMiddleware`). Easiest from the service's [Swagger UI](./swagger) under the **Admin** tag, or from a saved Insomnia request.
+
+Controller: `ProductFeedController` (`POST /admin/feed/products/all`) in `voyado-elevate`.
+
+## 3. Declare the facet in Elevate
+
+This is the step that actually creates the filter, and it lives **in Elevate, not in our repo**. In the Elevate **Experience app → Pages → Facet configurator**:
+
+1. Wait for the re-indexed attribute to appear (it only shows up once it's in the indexed data).
+2. Add it with **+**, choose **Display as**, set the **Sort** and optional **Unit**, then **Save & Publish**.
+
+| Display as | Backing data | Frontend renders as |
+|---|---|---|
+| `Values` (TEXT) | string / list of strings | checkbox list |
+| `Color` | string + colour code | colour swatches |
+| `Size` | size attribute | grouped size list |
+| `Range` (RANGE) | **numeric** attribute | min/max range control |
+| `Checkbox` (CHECKBOX) | boolean | single on/off toggle |
+
+> **Range needs a numeric filter Type.** Per Elevate's docs, the Range setting requires the attribute's filter Type to be numeric (`byte`, `double`, `float`, `int`, `long`, `short`). A range facet that comes back with `min: 0, max: 0` means *no numeric data in the feed for that attribute*, or *it isn't mapped as a numeric type* — not a frontend bug. See [Setting up and configuring facets](https://docs.elevate.voyado.cloud/elevate/4/guides/search-and-facets/setting-up-and-configuring-facets/).
+
+## 4. The frontend renders it automatically
+
+Facets come back in the storefront API response (`primaryList.facets[]`), are mapped by `grease-voyado-elevate` (`mapElevateFacetToGearsFacet`), and rendered by `blueprint-filter`. **No frontend code is required** for a new facet of a supported Display type — it appears in the filter UI on its own.
+
+Notes:
+
+- Facets are **not** gated by `presentCustom`. That option controls custom product *fields* the product mapper reads (see [Search Architecture §7](./search#7-elevateprovider--adapter-configuration)); facets are a separate part of the Elevate response.
+- To **hide** a returned facet, add its id to `excludeFacets` in the client's `ProductQueryOptions` (`elevate-bootstrap.tsx`).
+- Each brand has its **own Elevate account** — configuring a facet for Stronger does not affect Dedicated.
+
+## Gotchas
+
+- **The feed sends Centra data as-is.** You can't reshape an object → string in the feed. Extract a scalar with JSONPath (`$.attr[*].descr`) or reshape in the frontend.
+- **Forgot to `force`.** A mapping change with no forced re-index, or checking the Facet configurator before the run finishes, looks like "the attribute never showed up."
+- **The attribute has no values for the market you're testing.** The facet exists but filters to nothing because the data is empty/zero for that market's feed. Confirm against a market that actually has the data.
+- **Range with `min:0, max:0`.** Numeric data is missing or the filter Type isn't numeric. A healthy price range returns real bounds (e.g. `min: 600, max: 820`).
+- **Filtering on a raw object.** If you mapped `$.attr[*]` (the whole object array) instead of a sub-field, the facet values will be unusable. Map the specific field.
+
+## Troubleshooting
+
+**The attribute never appears in the Facet configurator** — it isn't in the indexed feed. Check the `mapping` entry, then re-run `POST /admin/feed/products/all?force=true` and wait for it to finish.
+
+**Facet appears but filters return nothing** — the attribute has no usable values for that market, or you mapped an object instead of a scalar field. Inspect a product in the feed/index and confirm the value is the scalar you expect.
+
+**A Range (price) facet returns 0 results for any sensible range, and its bounds are `0/0`** — the numeric data behind it is empty (or not numeric). This is a feed/Elevate-config issue, not the frontend: verify the attribute is populated and its filter Type is numeric. The request format itself (`f.<id>.min` / `f.<id>.max`) is handled by the client and is not the problem.
+
+**The facet shows on one brand but not another** — Elevate accounts are per-brand. Configure the facet in each brand's Experience app separately.
+
+## Related
+
+- [Search Architecture](./search) — how `grease-search` adapters (Elevate/Algolia/Centra) feed the same `useFacets` hook
+- [Product Feeds](./feeds) — the *other* outbound feeds (Algolia, Google Shopping); same admin-gated, `siteSlug`-style shape
+- [Swagger / OpenAPI](./swagger) — where the `voyado-elevate` Admin feed endpoint lives
+- [Centra Mappers](./centra-mappers) — the broader pattern of mapping Centra data into Gears shapes
+
+**Next:** [Search Architecture](./search) · [Product Feeds](./feeds) · [Swagger / OpenAPI](./swagger)
